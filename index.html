@@ -260,6 +260,8 @@
     let liveEnd = null;             // 即時預覽的終點位置
     let greenRegion = null;         // 綠色區塊描述
     let lastResult = null;
+    // 最近一次完整選取（起點+終點），供邊緣增益重算使用；不會在量測後被清空
+    let lastSelection = null;       // { tool, p0, p1 }
     let edgeGain = 1.0;             // 邊緣增益：>1 更靈敏，<1 過濾雜訊（提高門檻）
     // 基準雜訊門檻（梯度絕對值）；實際門檻 = BASE_EDGE_THRESHOLD / edgeGain
     const BASE_EDGE_THRESHOLD = 28;
@@ -725,12 +727,13 @@
       liveEnd = null;
       greenRegion = null;
       lastResult = null;
+      lastSelection = null;
       dragging = null;
       if (pixelsPerUnit <= 0) {
-        updateHint('影像已擷取，相機已關閉。請選「兩點距離」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
-        document.getElementById('result-text').textContent = '尚未校正。請先用兩點距離選取已知長度完成校正。';
+        updateHint('影像已擷取，相機已關閉。直線已知物：用「兩點距離」；圓形已知物：用「圓形」點中心→邊緣。完成後可調邊緣增益，再輸入實際尺寸按「完成校正」。');
+        document.getElementById('result-text').textContent = '尚未校正。直線用兩點距離；圓形尺規建議用「圓形」工具選外徑後完成校正。';
       } else {
-        updateHint('影像已擷取，相機已關閉。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。');
+        updateHint('影像已擷取，相機已關閉。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。完成後可用邊緣增益微調。');
         document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
       }
       drawOverlay();
@@ -966,14 +969,21 @@
         alert('請先擷取影像');
         return;
       }
-      const p0 = measurePoints[0];
-      const p1 = measurePoints[1] || liveEnd;
+      // 優先用當前暫存點；若已清空（量測完成後），改用 lastSelection 重算
+      let p0 = measurePoints[0];
+      let p1 = measurePoints[1] || liveEnd;
+      let tool = currentTool;
+      if ((!p0 || !p1) && lastSelection) {
+        p0 = lastSelection.p0;
+        p1 = lastSelection.p1;
+        tool = lastSelection.tool || currentTool;
+      }
       if (!p0 || !p1) return;
       const bandW = 16; // 綠色半寬
       // 選取完成後顯示增益調整列，方便即時過濾雜訊
       showEdgeGainControls(true);
 
-      if (currentTool === 'line') {
+      if (tool === 'line') {
         greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: p1.x, y2: p1.y, width: bandW };
         const edges = autoEdgeLine(p0.x, p0.y, p1.x, p1.y, bandW);
         const pixelDist = Math.hypot(edges.end.x - edges.start.x, edges.end.y - edges.start.y);
@@ -999,7 +1009,7 @@
             `請在上方輸入此段的「實際尺寸」，然後按「完成校正」。`;
         }
       }
-      else if (currentTool === 'rect') {
+      else if (tool === 'rect') {
         const x = Math.min(p0.x, p1.x);
         const y = Math.min(p0.y, p1.y);
         const w = Math.abs(p1.x - p0.x);
@@ -1027,7 +1037,7 @@
             `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
         }
       }
-      else if (currentTool === 'circle') {
+      else if (tool === 'circle') {
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const expand = 16;
         greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: expand };
@@ -1051,8 +1061,13 @@
           }
           document.getElementById('result-text').innerHTML = html;
         } else {
+          // 圓形工具也可直接用於校正（以外徑像素當已知長度）
+          const outerPx = (edges.outerR || r) * 2;
+          lastPixelForCalib = outerPx;
           document.getElementById('result-text').innerHTML =
-            `圓形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
+            `校正用圓形（自動邊緣）<br>` +
+            `偵測到外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
+            `若此圓為已知實際直徑，請在上方輸入實際尺寸後按「完成校正」。`;
         }
       }
       drawOverlay();
@@ -1089,8 +1104,14 @@
           liveEnd = pos;
           measurePoints[1] = pos;
           dragging = null;
+          // 保存選取，供後續調整邊緣增益時重算（不清空 lastSelection）
+          lastSelection = {
+            tool: currentTool,
+            p0: { x: measurePoints[0].x, y: measurePoints[0].y },
+            p1: { x: pos.x, y: pos.y }
+          };
           performMeasure();
-          // 保持結果，下次點擊再重新開始
+          // 清空暫存點，下次點擊可重新選取；lastSelection 保留
           measurePoints = [];
           liveEnd = null;
         }
@@ -1209,6 +1230,7 @@
       liveEnd = null;
       greenRegion = null;
       lastResult = null;
+      lastSelection = null;
       dragging = null;
       showEdgeGainControls(false);
       document.getElementById('result-text').textContent = '已清除量測。';
@@ -1223,12 +1245,13 @@
       liveEnd = null;
       greenRegion = null;
       lastResult = null;
+      lastSelection = null;
       dragging = null;
       isCaptured = false;
       showEdgeGainControls(false);
       // 相機已在擷取時關閉，重新開啟
       startCamera();
-      updateHint('已重置並重新開啟鏡頭。請擷取影像後，用「兩點距離」選取已知尺寸物件完成校正。');
+      updateHint('已重置並重新開啟鏡頭。請擷取影像後，用「兩點距離」或「圓形」選取已知尺寸物件完成校正。');
       drawOverlay();
     });
 
@@ -1253,6 +1276,7 @@
         liveEnd = null;
         greenRegion = null;
         lastResult = null;
+        lastSelection = null;
         dragging = null;
         showEdgeGainControls(false);
         drawOverlay();
@@ -1266,14 +1290,14 @@
     function applyEdgeGainFromUI() {
       edgeGain = parseFloat(edgeGainSlider.value) || 1.0;
       edgeGainValue.textContent = edgeGain.toFixed(1);
-      // 若已有完整選取，立即用新增益重算邊緣
-      if (isCaptured && measurePoints.length >= 2 && currentTool) {
+      // 使用 lastSelection（量測完成後仍保留），即時重算邊緣與粉紅準心
+      if (isCaptured && lastSelection && lastSelection.p0 && lastSelection.p1) {
         performMeasure();
       }
     }
     edgeGainSlider.addEventListener('input', applyEdgeGainFromUI);
     document.getElementById('btn-recalc-edge').addEventListener('click', () => {
-      if (isCaptured && measurePoints.length >= 2 && currentTool) {
+      if (isCaptured && lastSelection && lastSelection.p0 && lastSelection.p1) {
         performMeasure();
       } else {
         alert('請先完成綠色範圍選取（點選起點與終點）後再調整增益。');
