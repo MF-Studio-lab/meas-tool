@@ -29,8 +29,12 @@
       background: var(--panel);
       padding: 8px 12px;
       border-bottom: 1px solid #334155;
+      flex: 0 0 auto;
       flex-shrink: 0;
       z-index: 20;
+      max-height: 42vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .calib-row {
       display: flex;
@@ -113,32 +117,44 @@
       outline: 2px solid #2dd4bf;
       background: #0f766e;
     }
-    /* 下方結果區 */
+    /* 下方結果區：固定高度上限，多行結果在內部捲動，不擠壓影像區 */
     #result-panel {
       background: var(--panel);
       border-top: 1px solid #334155;
-      padding: 10px 14px;
+      padding: 8px 14px;
+      flex: 0 0 auto;
       flex-shrink: 0;
       font-size: 14px;
       min-height: 52px;
-      max-height: 35vh;          /* 限制最大高度，避免擠壓影像區 */
-      overflow-y: auto;          * 內容過多時內部滾動 */
+      max-height: 132px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     #result-panel .title { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
     #result-text { line-height: 1.45; }
+    #edge-gain-row { display: none; }
 
     /* ========== 手機版布局 (≤768px) ========== */
     @media (max-width: 768px) {
       body { flex-direction: column; }
       #main {
+        flex: 1 1 0;
+        min-height: 0;
         flex-direction: column;
       }
       #image-area {
-        flex: 1;
+        flex: 1 1 0;
         min-height: 0;
+      }
+      /* 擷取後 canvas 以容器為基準，避免結果列變高造成縮放位移 */
+      #canvas, #video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
       }
       #toolbar {
         width: 100%;
+        flex: 0 0 auto;
         flex-direction: row;
         overflow-x: auto;
         border-left: none;
@@ -153,7 +169,13 @@
         padding: 10px 14px;
         font-size: 13px;
       }
-      #result-panel { font-size: 13px; }
+      /* 手機結果區：固定上限高度，多層圓徑在此捲動，不擠影像 */
+      #result-panel {
+        font-size: 13px;
+        max-height: 110px;
+        min-height: 48px;
+        flex: 0 0 auto;
+      }
       input[type="number"] { width: 70px; }
     }
   </style>
@@ -197,14 +219,6 @@
         <span id="level-warn" style="color:#f87171; font-size:12px; display:none;">請保持水平</span>
       </div>
     </div>
-    <!-- 自動邊緣增益（選取綠色範圍後可微調） -->
-    <div class="calib-row" id="edge-gain-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap;">
-      <label title="調低可過濾雜訊、讓準心卡在強邊緣；調高則更靈敏但易受雜訊影響">邊緣增益</label>
-      <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:140px; accent-color:#0d9488;" />
-      <span id="edge-gain-value" style="font-size:13px; min-width:36px; color:#2dd4bf;">1.0</span>
-      <span style="font-size:11px; color:#94a3b8;">← 過濾雜訊　靈敏 →</span>
-      <button id="btn-recalc-edge" class="secondary" style="padding:5px 10px; font-size:12px;">重新計算邊緣</button>
-    </div>
     <div class="hint" id="calib-hint">建議流程（自動邊緣校正）：開啟鏡頭 → 按「擷取影像」→ 選「兩點距離」在已知尺寸物件上點選起點與終點（會出現綠色區塊並自動對邊）→ 輸入實際尺寸 → 按「完成校正」。半透明尺規為手動備援，不會產生綠色區塊。</div>
   </div>
 
@@ -228,10 +242,18 @@
     </div>
   </div>
 
-  <!-- 下方結果 -->
+  <!-- 下方結果（固定高度上限，多行在內部捲動，不擠壓影像） -->
   <div id="result-panel">
     <div class="title">量測結果（自動邊緣計算，降低人為誤差）</div>
     <div id="result-text">請先完成校正並擷取影像，再使用工具進行量測。</div>
+    <!-- 邊緣增益放在結果區內，避免上方列變高擠壓影像 -->
+    <div id="edge-gain-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; padding-top:6px; border-top:1px solid #334155;">
+      <label style="font-size:12px;" title="調低可過濾雜訊、讓準心卡在強邊緣；調高則更靈敏但易受雜訊影響">邊緣增益</label>
+      <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:120px; accent-color:#0d9488;" />
+      <span id="edge-gain-value" style="font-size:12px; min-width:32px; color:#2dd4bf;">1.0</span>
+      <span style="font-size:11px; color:#94a3b8;">← 雜訊　靈敏 →</span>
+      <button id="btn-recalc-edge" class="secondary" style="padding:4px 8px; font-size:11px;">重算邊緣</button>
+    </div>
   </div>
 
   <script>
@@ -442,19 +464,37 @@
     function resizeOverlay() {
       const area = document.getElementById('image-area');
       const rect = area.getBoundingClientRect();
+      // 已擷取後：鎖定為 canvas 緩衝尺寸，避免結果列／工具列變高造成座標系偏移
+      if (isCaptured && canvas.width > 0 && canvas.height > 0) {
+        overlay.width = canvas.width;
+        overlay.height = canvas.height;
+        overlay.style.width = canvas.width + 'px';
+        overlay.style.height = canvas.height + 'px';
+        // 讓 overlay 與 canvas 同位置對齊（置中於 image-area）
+        const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height);
+        const dispW = canvas.width * scale;
+        const dispH = canvas.height * scale;
+        const ox = (rect.width - dispW) / 2;
+        const oy = (rect.height - dispH) / 2;
+        overlay.style.left = ox + 'px';
+        overlay.style.top = oy + 'px';
+        overlay.style.width = dispW + 'px';
+        overlay.style.height = dispH + 'px';
+        // 注意：width/height 屬性仍為 canvas 像素座標，style 只負責顯示縮放
+        canvas.style.width = dispW + 'px';
+        canvas.style.height = dispH + 'px';
+        drawOverlay();
+        return;
+      }
       const w = Math.floor(rect.width);
       const h = Math.floor(rect.height);
       overlay.width = w;
       overlay.height = h;
+      overlay.style.left = '0';
+      overlay.style.top = '0';
       overlay.style.width = w + 'px';
       overlay.style.height = h + 'px';
-      if (isCaptured) {
-        // 保持 canvas 與影像比例
-        drawOverlay();
-      } else {
-        // 預覽時也畫尺規
-        drawOverlay();
-      }
+      drawOverlay();
     }
     window.addEventListener('resize', resizeOverlay);
 
@@ -738,7 +778,8 @@
         updateHint('影像已擷取，相機已關閉。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。完成後可用邊緣增益微調。');
         document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
       }
-      drawOverlay();
+      // 同步 overlay 與 canvas 顯示尺寸（手機結果列變動時也不錯位）
+      resizeOverlay();
     }
 
     // ==================== 簡易邊緣偵測（純 JS，降低人為誤差） ====================
@@ -964,6 +1005,7 @@
     function showEdgeGainControls(show) {
       const row = document.getElementById('edge-gain-row');
       if (row) row.style.display = show ? 'flex' : 'none';
+      // 結果區內部捲動即可，不改變影像區高度，避免綠色區域位移
     }
 
     function performMeasure() {
@@ -1078,12 +1120,34 @@
     // ==================== 事件處理 ====================
     function getPos(e) {
       const rect = overlay.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      // touchend 時 touches 為空，改用 changedTouches
+      const t = (e.touches && e.touches[0])
+        || (e.changedTouches && e.changedTouches[0])
+        || e;
+      const clientX = t.clientX;
+      const clientY = t.clientY;
+      // 顯示尺寸可能因 CSS 縮放與緩衝像素不同，需換算回 canvas／overlay 座標
+      const scaleX = rect.width > 0 ? (overlay.width / rect.width) : 1;
+      const scaleY = rect.height > 0 ? (overlay.height / rect.height) : 1;
       return {
-        x: clientX - rect.left,
-        y: clientY - rect.top
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY
       };
+    }
+
+    // 完成一次量測選取（共用：拖曳放開 或 第二次點擊）
+    function finishMeasureSelection(p0, p1) {
+      liveEnd = p1;
+      measurePoints = [p0, p1];
+      lastSelection = {
+        tool: currentTool,
+        p0: { x: p0.x, y: p0.y },
+        p1: { x: p1.x, y: p1.y }
+      };
+      dragging = null;
+      performMeasure();
+      measurePoints = [];
+      liveEnd = null;
     }
 
     // 尺規拖曳
@@ -1094,28 +1158,16 @@
         const pos = getPos(e);
 
         if (measurePoints.length === 0) {
-          // 第一次點擊：設定起點，開始即時綠色預覽
+          // 按下：設定起點，開始拖曳預覽（手機：按住拖到終點再放開即可）
           measurePoints = [pos];
           liveEnd = pos;
           greenRegion = null;
           lastResult = null;
-          dragging = { type: 'measure-live' };
+          dragging = { type: 'measure-live', startX: pos.x, startY: pos.y, moved: false };
           drawOverlay();
         } else {
-          // 第二次點擊：確定終點並執行自動邊緣
-          liveEnd = pos;
-          measurePoints[1] = pos;
-          dragging = null;
-          // 保存選取，供後續調整邊緣增益時重算（不清空 lastSelection）
-          lastSelection = {
-            tool: currentTool,
-            p0: { x: measurePoints[0].x, y: measurePoints[0].y },
-            p1: { x: pos.x, y: pos.y }
-          };
-          performMeasure();
-          // 清空暫存點，下次點擊可重新選取；lastSelection 保留
-          measurePoints = [];
-          liveEnd = null;
+          // 第二次點擊（未拖曳、僅輕點起點後再點終點的桌面習慣）
+          finishMeasureSelection(measurePoints[0], pos);
         }
         return;
       }
@@ -1147,11 +1199,13 @@
       e.preventDefault();
       const pos = getPos(e);
 
-      // 量測即時綠色區塊預覽（點選起點後持續顯示）
+      // 量測即時綠色區塊預覽（按住拖曳時持續更新）
       if (dragging.type === 'measure-live' && measurePoints.length >= 1 && currentTool) {
         const p0 = measurePoints[0];
         const bandW = 16;
         liveEnd = pos;
+        const movedDist = Math.hypot(pos.x - (dragging.startX ?? p0.x), pos.y - (dragging.startY ?? p0.y));
+        if (movedDist >= 8) dragging.moved = true;
 
         if (currentTool === 'line') {
           greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: pos.x, y2: pos.y, width: bandW };
@@ -1188,8 +1242,27 @@
     }
 
     function onPointerUp(e) {
-      if (dragging && dragging.type === 'measure-live') {
-        // 保持 measure-live 直到第二次點擊，不在這裡清除
+      // 滑鼠移出畫面時不結束量測，避免誤觸
+      if (e.type === 'mouseleave') {
+        if (dragging && dragging.type === 'measure-live') return;
+        dragging = null;
+        return;
+      }
+
+      if (dragging && dragging.type === 'measure-live' && measurePoints.length >= 1 && currentTool) {
+        const pos = getPos(e);
+        const p0 = measurePoints[0];
+        const dist = Math.hypot(pos.x - p0.x, pos.y - p0.y);
+        // 有實際拖曳（超過門檻）→ 放開即視為終點，完成量測（手機直覺操作）
+        if (dragging.moved || dist >= 12) {
+          finishMeasureSelection(p0, pos);
+          return;
+        }
+        // 幾乎沒移動：視為「輕點起點」，保留起點等待第二次點擊（桌面兩點點選）
+        liveEnd = p0;
+        greenRegion = null;
+        dragging = null;
+        drawOverlay();
         return;
       }
       dragging = null;
@@ -1282,7 +1355,7 @@
         dragging = null;
         showEdgeGainControls(false);
         drawOverlay();
-        updateHint(`已選擇「${btn.textContent}」。點選起點後會即時顯示綠色邊緣範圍，移動確認涵蓋正確後再點選終點，系統會自動對邊計算。完成後可用「邊緣增益」過濾雜訊微調準心。`);
+        updateHint(`已選擇「${btn.textContent}」。手機：按住起點拖到終點再放開即可；桌面也可點兩下。拖曳時會顯示綠色範圍，放開後自動對邊。完成後可用邊緣增益微調。`);
       });
     });
 
