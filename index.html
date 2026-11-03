@@ -195,6 +195,14 @@
         <span id="level-warn" style="color:#f87171; font-size:12px; display:none;">請保持水平</span>
       </div>
     </div>
+    <!-- 自動邊緣增益（選取綠色範圍後可微調） -->
+    <div class="calib-row" id="edge-gain-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap;">
+      <label title="調低可過濾雜訊、讓準心卡在強邊緣；調高則更靈敏但易受雜訊影響">邊緣增益</label>
+      <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:140px; accent-color:#0d9488;" />
+      <span id="edge-gain-value" style="font-size:13px; min-width:36px; color:#2dd4bf;">1.0</span>
+      <span style="font-size:11px; color:#94a3b8;">← 過濾雜訊　靈敏 →</span>
+      <button id="btn-recalc-edge" class="secondary" style="padding:5px 10px; font-size:12px;">重新計算邊緣</button>
+    </div>
     <div class="hint" id="calib-hint">建議流程（自動邊緣校正）：開啟鏡頭 → 按「擷取影像」→ 選「兩點距離」在已知尺寸物件上點選起點與終點（會出現綠色區塊並自動對邊）→ 輸入實際尺寸 → 按「完成校正」。半透明尺規為手動備援，不會產生綠色區塊。</div>
   </div>
 
@@ -252,6 +260,9 @@
     let liveEnd = null;             // 即時預覽的終點位置
     let greenRegion = null;         // 綠色區塊描述
     let lastResult = null;
+    let edgeGain = 1.0;             // 邊緣增益：>1 更靈敏，<1 過濾雜訊（提高門檻）
+    // 基準雜訊門檻（梯度絕對值）；實際門檻 = BASE_EDGE_THRESHOLD / edgeGain
+    const BASE_EDGE_THRESHOLD = 28;
 
     // ==================== 初始化鏡頭 ====================
     async function startCamera() {
@@ -392,7 +403,7 @@
         hint.textContent = messages.length ? ('不支援：' + messages.join('、')) : '變焦 / 補光可用';
       } else {
         controls.style.display = 'flex';
-        hint.textContent = '此裝置不支援變焦、補光燈、ISO、手動對焦等進階控制（瀏覽器限制）';
+        hint.textContent = '此裝置不支援變焦、補光、ISO、手動對焦等進階控制（瀏覽器限制）';
       }
     }
 
@@ -748,10 +759,16 @@
       const bl = gray(idx + w*4 - 4), bc = gray(idx + w*4), br = gray(idx + w*4 + 4);
       const gx = -tl + tr - 2*ml + 2*mr - bl + br;
       const gy = -tl - 2*tc - tr + bl + 2*bc + br;
-      return Math.abs(gx) + Math.abs(gy);
+      // 套用增益：放大梯度後再與門檻比較，利於過濾弱雜訊
+      return (Math.abs(gx) + Math.abs(gy)) * edgeGain;
     }
 
-    // 兩點距離：在帶狀區域兩端找最強邊緣點
+    function getEdgeThreshold() {
+      // 增益越高 → 有效門檻越低（更靈敏）；增益越低 → 門檻越高（過濾雜訊）
+      return BASE_EDGE_THRESHOLD;
+    }
+
+    // 兩點距離：在帶狀區域兩端找最強邊緣點（支援增益／門檻過濾雜訊）
     function autoEdgeLine(x1, y1, x2, y2, bandWidth) {
       const imgData = getImageDataSafe();
       if (!imgData) return { start: {x:x1,y:y1}, end: {x:x2,y:y2} };
@@ -760,23 +777,43 @@
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len, uy = dy / len;
       const px = -uy, py = ux; // 垂直方向
+      const minG = getEdgeThreshold();
 
       function findStrongestNear(cx, cy, searchRadius) {
+        // 優先沿「垂直於量測線」方向搜尋真實邊緣，減少沿線雜訊干擾
         let best = { x: cx, y: cy, g: -1 };
-        for (let r = 0; r <= searchRadius; r += 1) {
-          for (let a = 0; a < 16; a++) {
-            const ang = (a / 16) * Math.PI * 2;
-            const sx = cx + Math.cos(ang) * r;
-            const sy = cy + Math.sin(ang) * r;
-            // 限制在帶狀內
-            const proj = ((sx - x1) * ux + (sy - y1) * uy);
-            if (proj < -5 || proj > len + 5) continue;
-            const distToLine = Math.abs((sx - x1) * px + (sy - y1) * py);
-            if (distToLine > bandWidth) continue;
-            const g = gradientAt(imgData, sx, sy);
-            if (g > best.g) best = { x: sx, y: sy, g };
+        const normalSteps = Math.max(searchRadius, 12);
+        // 1) 沿法線方向精細掃描（最能對準邊緣）
+        for (let d = -normalSteps; d <= normalSteps; d++) {
+          const sx = cx + px * d;
+          const sy = cy + py * d;
+          const proj = ((sx - x1) * ux + (sy - y1) * uy);
+          if (proj < -8 || proj > len + 8) continue;
+          const distToLine = Math.abs((sx - x1) * px + (sy - y1) * py);
+          if (distToLine > bandWidth + 2) continue;
+          const g = gradientAt(imgData, sx, sy);
+          if (g < minG) continue; // 低於門檻視為雜訊，略過
+          if (g > best.g) best = { x: sx, y: sy, g };
+        }
+        // 2) 若法線方向找不到夠強的點，再做小範圍環狀備援搜尋
+        if (best.g < minG) {
+          for (let r = 0; r <= searchRadius; r += 1) {
+            for (let a = 0; a < 20; a++) {
+              const ang = (a / 20) * Math.PI * 2;
+              const sx = cx + Math.cos(ang) * r;
+              const sy = cy + Math.sin(ang) * r;
+              const proj = ((sx - x1) * ux + (sy - y1) * uy);
+              if (proj < -5 || proj > len + 5) continue;
+              const distToLine = Math.abs((sx - x1) * px + (sy - y1) * py);
+              if (distToLine > bandWidth) continue;
+              const g = gradientAt(imgData, sx, sy);
+              if (g < minG) continue;
+              if (g > best.g) best = { x: sx, y: sy, g };
+            }
           }
         }
+        // 若仍無合格邊緣，退回原點（不亂跳）
+        if (best.g < 0) return { x: cx, y: cy, g: 0 };
         return best;
       }
 
@@ -797,6 +834,7 @@
       function sampleEdge(x0, y0, x1, y1, outwardX, outwardY) {
         const samples = [];
         const steps = 12;
+        const minG = getEdgeThreshold();
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const bx = x0 + (x1 - x0) * t;
@@ -806,9 +844,11 @@
             const sx = bx + outwardX * d;
             const sy = by + outwardY * d;
             const g = gradientAt(imgData, sx, sy);
+            if (g < minG) continue; // 低於門檻略過雜訊
             if (g > bestG) { bestG = g; bestD = d; }
           }
-          samples.push(bestD);
+          // 若此點整條掃描都沒有合格邊緣，維持 0（不偏移）
+          samples.push(bestG >= minG ? bestD : 0);
         }
         // 取中位數
         samples.sort((a,b)=>a-b);
@@ -875,9 +915,10 @@
       }
 
       // 找局部極大值（邊緣候選），需超過門檻且與鄰近峰有足夠距離
+      // profile 已含 edgeGain，門檻用 getEdgeThreshold() 統一過濾雜訊
       const peaks = [];
       const minPeakDist = 4;
-      const threshold = 18;
+      const threshold = getEdgeThreshold() * 0.65; // 剖面為多角度平均，略降門檻
       for (let rad = 3; rad < maxR - 1; rad++) {
         const g = profile[rad];
         if (g < threshold) continue;
@@ -915,6 +956,11 @@
     let lastPixelForCalib = 0;
 
     // ==================== 執行量測（綠色區塊 + 自動邊緣） ====================
+    function showEdgeGainControls(show) {
+      const row = document.getElementById('edge-gain-row');
+      if (row) row.style.display = show ? 'flex' : 'none';
+    }
+
     function performMeasure() {
       if (!isCaptured) {
         alert('請先擷取影像');
@@ -924,6 +970,8 @@
       const p1 = measurePoints[1] || liveEnd;
       if (!p0 || !p1) return;
       const bandW = 16; // 綠色半寬
+      // 選取完成後顯示增益調整列，方便即時過濾雜訊
+      showEdgeGainControls(true);
 
       if (currentTool === 'line') {
         greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: p1.x, y2: p1.y, width: bandW };
@@ -1162,6 +1210,7 @@
       greenRegion = null;
       lastResult = null;
       dragging = null;
+      showEdgeGainControls(false);
       document.getElementById('result-text').textContent = '已清除量測。';
       drawOverlay();
     });
@@ -1176,6 +1225,7 @@
       lastResult = null;
       dragging = null;
       isCaptured = false;
+      showEdgeGainControls(false);
       // 相機已在擷取時關閉，重新開啟
       startCamera();
       updateHint('已重置並重新開啟鏡頭。請擷取影像後，用「兩點距離」選取已知尺寸物件完成校正。');
@@ -1204,9 +1254,30 @@
         greenRegion = null;
         lastResult = null;
         dragging = null;
+        showEdgeGainControls(false);
         drawOverlay();
-        updateHint(`已選擇「${btn.textContent}」。點選起點後會即時顯示綠色邊緣範圍，移動確認涵蓋正確後再點選終點，系統會自動對邊計算。`);
+        updateHint(`已選擇「${btn.textContent}」。點選起點後會即時顯示綠色邊緣範圍，移動確認涵蓋正確後再點選終點，系統會自動對邊計算。完成後可用「邊緣增益」過濾雜訊微調準心。`);
       });
+    });
+
+    // 邊緣增益滑桿：即時重算
+    const edgeGainSlider = document.getElementById('edge-gain');
+    const edgeGainValue = document.getElementById('edge-gain-value');
+    function applyEdgeGainFromUI() {
+      edgeGain = parseFloat(edgeGainSlider.value) || 1.0;
+      edgeGainValue.textContent = edgeGain.toFixed(1);
+      // 若已有完整選取，立即用新增益重算邊緣
+      if (isCaptured && measurePoints.length >= 2 && currentTool) {
+        performMeasure();
+      }
+    }
+    edgeGainSlider.addEventListener('input', applyEdgeGainFromUI);
+    document.getElementById('btn-recalc-edge').addEventListener('click', () => {
+      if (isCaptured && measurePoints.length >= 2 && currentTool) {
+        performMeasure();
+      } else {
+        alert('請先完成綠色範圍選取（點選起點與終點）後再調整增益。');
+      }
     });
 
     function updateHint(msg) {
