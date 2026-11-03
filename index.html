@@ -936,66 +936,232 @@
       return { outer, inner };
     }
 
-    // 圓形：在整個選取半徑內找多層同心邊緣（外徑 + 多個內徑）
+    // 灰階取樣（雙線性）
+    function sampleGray(imgData, x, y) {
+      const w = imgData.width, h = imgData.height;
+      const data = imgData.data;
+      if (x < 0 || y < 0 || x >= w - 1 || y >= h - 1) return 0;
+      const x0 = Math.floor(x), y0 = Math.floor(y);
+      const fx = x - x0, fy = y - y0;
+      const at = (ix, iy) => {
+        const i = (iy * w + ix) * 4;
+        return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      };
+      const g00 = at(x0, y0), g10 = at(x0 + 1, y0);
+      const g01 = at(x0, y0 + 1), g11 = at(x0 + 1, y0 + 1);
+      return g00 * (1 - fx) * (1 - fy) + g10 * fx * (1 - fy) + g01 * (1 - fx) * fy + g11 * fx * fy;
+    }
+
+    // 亞像素峰值（拋物線擬合）
+    function subpixelPeak(y0, y1, y2) {
+      const denom = 2 * (2 * y1 - y0 - y2);
+      if (Math.abs(denom) < 1e-6) return 0;
+      const d = (y0 - y2) / denom;
+      return Math.max(-0.5, Math.min(0.5, d));
+    }
+
+    // 圓形：沿多條射線做強度梯度 → 中位數半徑 + 亞像素 + 圓心精修
     function autoEdgeCircle(cx, cy, r, expand) {
       const imgData = getImageDataSafe();
       if (!imgData) return { cx, cy, radii: [r], outerR: r, innerR: null };
 
-      const maxR = Math.max(r + expand, 8);
-      const angles = 48;
-      const step = 1; // 徑向取樣間隔（像素）
-      const profile = new Float32Array(Math.ceil(maxR) + 1);
+      const maxR = Math.max(r + expand, 10);
+      const minR = 2;
+      const angles = 72;          // 更多角度提升圓度與抗雜訊
+      const step = 0.5;          // 半像素徑向取樣
+      const nBins = Math.floor((maxR - minR) / step) + 1;
+      const profile = new Float32Array(nBins); // 平均 |dI/dr|
+      const profileCnt = new Uint16Array(nBins);
 
-      // 建立徑向平均梯度剖面
-      for (let rad = 1; rad <= maxR; rad += step) {
-        let sumG = 0, cnt = 0;
-        for (let i = 0; i < angles; i++) {
-          const ang = (i / angles) * Math.PI * 2;
-          const sx = cx + Math.cos(ang) * rad;
-          const sy = cy + Math.sin(ang) * rad;
-          const g = gradientAt(imgData, sx, sy);
-          sumG += g;
-          cnt++;
+      // ---- 1) 徑向強度梯度剖面（比單純 Sobel 更對準「圓形邊界」）----
+      for (let i = 0; i < angles; i++) {
+        const ang = (i / angles) * Math.PI * 2;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        let prevGray = sampleGray(imgData, cx + cos * minR, cy + sin * minR);
+        for (let bi = 1; bi < nBins; bi++) {
+          const rad = minR + bi * step;
+          const g = sampleGray(imgData, cx + cos * rad, cy + sin * rad);
+          const deriv = Math.abs(g - prevGray) / step;
+          profile[bi] += deriv;
+          profileCnt[bi]++;
+          prevGray = g;
         }
-        profile[rad] = cnt ? sumG / cnt : 0;
+      }
+      for (let bi = 0; bi < nBins; bi++) {
+        if (profileCnt[bi] > 0) profile[bi] = (profile[bi] / profileCnt[bi]) * edgeGain;
       }
 
-      // 找局部極大值（邊緣候選），需超過門檻且與鄰近峰有足夠距離
-      // profile 已含 edgeGain，門檻用 getEdgeThreshold() 統一過濾雜訊
+      // ---- 2) 找剖面峰值並亞像素精修 ----
+      const threshold = Math.max(2.5, getEdgeThreshold() * 0.08); // 強度差門檻（較適合 dI/dr）
+      // 動態門檻：取剖面 85 百分位的一定比例，避免固定值在不同曝光失效
+      const sortedP = Array.from(profile).filter(v => v > 0).sort((a, b) => a - b);
+      const p85 = sortedP.length ? sortedP[Math.floor(sortedP.length * 0.85)] : threshold;
+      const peakTh = Math.max(threshold, p85 * 0.35);
+
       const peaks = [];
-      const minPeakDist = 4;
-      const threshold = getEdgeThreshold() * 0.65; // 剖面為多角度平均，略降門檻
-      for (let rad = 3; rad < maxR - 1; rad++) {
-        const g = profile[rad];
-        if (g < threshold) continue;
-        if (g >= profile[rad - 1] && g >= profile[rad + 1]) {
-          // 非極大抑制：與已有峰太近就保留較強者
+      const minPeakDistBins = Math.max(3, Math.round(3 / step)); // ~1.5px
+      for (let bi = 2; bi < nBins - 2; bi++) {
+        const v = profile[bi];
+        if (v < peakTh) continue;
+        if (v >= profile[bi - 1] && v >= profile[bi + 1]) {
+          const d = subpixelPeak(profile[bi - 1], profile[bi], profile[bi + 1]);
+          const rad = minR + (bi + d) * step;
           let keep = true;
           for (let k = 0; k < peaks.length; k++) {
-            if (Math.abs(peaks[k].r - rad) < minPeakDist) {
-              if (g > peaks[k].g) {
-                peaks[k] = { r: rad, g };
-              }
+            if (Math.abs(peaks[k].r - rad) < minPeakDistBins * step) {
+              if (v > peaks[k].g) peaks[k] = { r: rad, g: v, bi };
               keep = false;
               break;
             }
           }
-          if (keep) peaks.push({ r: rad, g });
+          if (keep) peaks.push({ r: rad, g: v, bi });
         }
       }
 
-      // 依半徑由大到小排序
-      peaks.sort((a, b) => b.r - a.r);
-
-      // 若找不到明顯邊緣，退回使用者粗選半徑
       if (peaks.length === 0) {
         return { cx, cy, radii: [r], outerR: r, innerR: null };
       }
 
-      const radii = peaks.map(p => p.r);
-      const outerR = radii[0];
+      // ---- 3) 外徑：優先取「靠近使用者拖曳半徑 r」且夠強的峰，避免吃到外圈反光 ----
+      // 搜尋範圍：r ± expand，若無則退回最強峰
+      let outerPeak = null;
+      let bestScore = -1;
+      for (const p of peaks) {
+        const dist = Math.abs(p.r - r);
+        if (dist <= expand + 2) {
+          // 強度高、距離使用者指定半徑近 → 分數高
+          const score = p.g / (1 + dist * 0.35);
+          if (score > bestScore) {
+            bestScore = score;
+            outerPeak = p;
+          }
+        }
+      }
+      if (!outerPeak) {
+        // 退回：取 r 附近最接近者，再不然取最大半徑峰
+        peaks.sort((a, b) => Math.abs(a.r - r) - Math.abs(b.r - r));
+        outerPeak = peaks[0];
+      }
+
+      // ---- 4) 以各角度在 outer 附近精修，並估計更準的圓心 ----
+      const rayRs = [];
+      const edgePts = [];
+      const searchHalf = Math.min(expand, 10);
+      for (let i = 0; i < angles; i++) {
+        const ang = (i / angles) * Math.PI * 2;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        let bestR = outerPeak.r, bestD = -1;
+        for (let d = -searchHalf; d <= searchHalf; d += 0.5) {
+          const rad = outerPeak.r + d;
+          if (rad < 3) continue;
+          const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
+          const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
+          const deriv = Math.abs(g2 - g1);
+          if (deriv > bestD) {
+            bestD = deriv;
+            bestR = rad;
+          }
+        }
+        if (bestD > peakTh * 0.5) {
+          rayRs.push(bestR);
+          edgePts.push({
+            x: cx + cos * bestR,
+            y: cy + sin * bestR
+          });
+        }
+      }
+
+      // 圓心精修：邊緣點幾何平均（對近似圓足夠穩）
+      let refinedCx = cx, refinedCy = cy;
+      if (edgePts.length >= 12) {
+        let sx = 0, sy = 0;
+        for (const p of edgePts) { sx += p.x; sy += p.y; }
+        // 用「邊緣點平均」會偏向圓心，但需再以半徑一致性微調
+        // 改：固定用原 cx,cy 為主，僅做小幅偏移估計
+        // 簡單代數：對 x^2+y^2 圓擬合的簡化一步
+        let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumXY = 0, sumX3 = 0, sumY3 = 0, sumX2Y = 0, sumXY2 = 0;
+        const n = edgePts.length;
+        for (const p of edgePts) {
+          const x = p.x, y = p.y;
+          sumX += x; sumY += y;
+          sumX2 += x * x; sumY2 += y * y; sumXY += x * y;
+          sumX3 += x * x * x; sumY3 += y * y * y;
+          sumX2Y += x * x * y; sumXY2 += x * y * y;
+        }
+        // 解圓：x^2+y^2 + D x + E y + F = 0
+        const A = n * sumX2 - sumX * sumX;
+        const B = n * sumXY - sumX * sumY;
+        const C = n * sumY2 - sumY * sumY;
+        const G = 0.5 * (n * sumX3 + n * sumXY2 - sumX * sumX2 - sumX * sumY2);
+        const H = 0.5 * (n * sumY3 + n * sumX2Y - sumY * sumX2 - sumY * sumY2);
+        const det = A * C - B * B;
+        if (Math.abs(det) > 1e-6) {
+          const d = (G * C - H * B) / det;
+          const e = (A * H - B * G) / det;
+          const ncx = -d;
+          const ncy = -e;
+          // 僅在偏移不大時採用（避免亂跳）
+          if (Math.hypot(ncx - cx, ncy - cy) < Math.max(6, r * 0.08)) {
+            refinedCx = ncx;
+            refinedCy = ncy;
+          }
+        }
+        // 以精修圓心重算各點半徑中位數
+        const rs2 = edgePts.map(p => Math.hypot(p.x - refinedCx, p.y - refinedCy));
+        rs2.sort((a, b) => a - b);
+        rayRs.length = 0;
+        for (const v of rs2) rayRs.push(v);
+      }
+
+      rayRs.sort((a, b) => a - b);
+      const outerR = rayRs.length
+        ? rayRs[Math.floor(rayRs.length / 2)]
+        : outerPeak.r;
+
+      // ---- 5) 其餘內徑峰：在 outer 以內、強度夠、與外徑有間隔 ----
+      const innerPeaks = peaks
+        .filter(p => p.r < outerR - 3 && p.g >= peakTh * 0.7)
+        .sort((a, b) => b.r - a.r);
+
+      // 對每個內徑峰也做射線中位數精修（較省：只用 36 角）
+      const refinedInners = [];
+      for (const ip of innerPeaks) {
+        const irs = [];
+        for (let i = 0; i < 36; i++) {
+          const ang = (i / 36) * Math.PI * 2;
+          const cos = Math.cos(ang), sin = Math.sin(ang);
+          let bestR = ip.r, bestD = -1;
+          for (let d = -4; d <= 4; d += 0.5) {
+            const rad = ip.r + d;
+            if (rad < 2 || rad > outerR - 2) continue;
+            const g1 = sampleGray(imgData, refinedCx + cos * (rad - 0.5), refinedCy + sin * (rad - 0.5));
+            const g2 = sampleGray(imgData, refinedCx + cos * (rad + 0.5), refinedCy + sin * (rad + 0.5));
+            const deriv = Math.abs(g2 - g1);
+            if (deriv > bestD) { bestD = deriv; bestR = rad; }
+          }
+          if (bestD > peakTh * 0.4) irs.push(bestR);
+        }
+        if (irs.length >= 10) {
+          irs.sort((a, b) => a - b);
+          refinedInners.push(irs[Math.floor(irs.length / 2)]);
+        }
+      }
+
+      // 去重（間隔至少 2px）
+      const radii = [outerR];
+      for (const ir of refinedInners) {
+        if (radii.every(x => Math.abs(x - ir) >= 2)) radii.push(ir);
+      }
+      radii.sort((a, b) => b - a);
+
       const innerR = radii.length > 1 ? radii[1] : null;
-      return { cx, cy, radii, outerR, innerR };
+      return {
+        cx: refinedCx,
+        cy: refinedCy,
+        radii,
+        outerR: radii[0],
+        innerR
+      };
     }
 
     // 最近一次自動邊緣得到的像素距離（供校正使用）
@@ -1093,10 +1259,14 @@
           let html = `圓形（自動邊緣，共偵測 ${radii.length} 層）`;
           radii.forEach((rad, idx) => {
             const d = (rad * 2) / pixelsPerUnit;
+            const pxD = rad * 2;
             if (idx === 0) {
-              html += `<br><strong>外徑：${d.toFixed(3)} ${currentUnit}</strong>`;
+              html += `<br><strong>外徑：${d.toFixed(3)} ${currentUnit}</strong> <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
             } else {
-              html += `<br>內徑 ${idx}：${d.toFixed(3)} ${currentUnit}`;
+              html += `<br>內徑 ${idx}：${d.toFixed(3)} ${currentUnit} <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
+              if (pxD < 10) {
+                html += ` <span style="color:#fbbf24;font-size:11px;">※像素過少，誤差較大</span>`;
+              }
             }
           });
           if (radii.length >= 2) {
