@@ -237,6 +237,7 @@
       <button id="tool-rect" data-tool="rect">矩形</button>
       <button id="tool-circle" data-tool="circle">圓形</button>
       <button id="btn-clear" class="secondary">清除量測</button>
+      <button id="btn-recapture-measure" class="secondary">重新擷取</button>
       <button id="btn-recalib" class="secondary">重新校正</button>
       <button id="btn-capture">擷取影像</button>
     </div>
@@ -291,7 +292,8 @@
     const BASE_EDGE_THRESHOLD = 28;
 
     // ==================== 初始化鏡頭 ====================
-    async function startCamera() {
+    // preserveCalibration=true：換試件重新擷取，保留校正比例
+    async function startCamera(preserveCalibration = false) {
       // 檢查是否為安全環境（HTTPS 或 localhost）
       const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
       
@@ -336,15 +338,34 @@
         video.style.display = 'block';
         canvas.style.display = 'none';
         isCaptured = false;
-        pixelsPerUnit = 0;
+        if (!preserveCalibration) {
+          pixelsPerUnit = 0;
+        }
         torchOn = false;
+
+        // 清除當前量測狀態（無論是否保留校正）
+        measurePoints = [];
+        liveEnd = null;
+        greenRegion = null;
+        lastResult = null;
+        lastSelection = null;
+        dragging = null;
+        scaleVisible = false;
+        document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
+        showEdgeGainControls(false);
 
         // 取得 video track 並偵測可用能力
         videoTrack = stream.getVideoTracks()[0] || null;
         setupCameraControls(videoTrack);
 
-        updateHint('鏡頭已開啟。建議：先按「擷取影像」→ 用「兩點距離」選已知長度（出現綠色區塊＝自動邊緣）→ 輸入實際尺寸 →「完成校正」。半透明尺規僅為手動備援。');
-        document.getElementById('result-text').textContent = '請先完成校正並擷取影像。';
+        if (preserveCalibration && pixelsPerUnit > 0) {
+          updateHint(`鏡頭已開啟（校正比例 ${pixelsPerUnit.toFixed(2)} px/${currentUnit} 已保留）。對準新試件後按「擷取影像」即可量測。`);
+          document.getElementById('result-text').textContent =
+            `校正仍有效（${pixelsPerUnit.toFixed(2)} px / ${currentUnit}）。請擷取新試件影像後直接量測。`;
+        } else {
+          updateHint('鏡頭已開啟。建議：先按「擷取影像」→ 用「兩點距離」選已知長度（出現綠色區塊＝自動邊緣）→ 輸入實際尺寸 →「完成校正」。半透明尺規僅為手動備援。');
+          document.getElementById('result-text').textContent = '請先完成校正並擷取影像。';
+        }
         resizeOverlay();
       } catch (err) {
         let msg = '無法開啟鏡頭：' + (err.message || err.name || '未知錯誤');
@@ -1618,6 +1639,10 @@
       document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
     });
     document.getElementById('btn-capture').addEventListener('click', captureImage);
+    // 下方工具列：重新擷取（換試件，保留校正）
+    document.getElementById('btn-recapture-measure').addEventListener('click', () => {
+      startCamera(true);
+    });
     document.getElementById('btn-clear').addEventListener('click', () => {
       measurePoints = [];
       liveEnd = null;
