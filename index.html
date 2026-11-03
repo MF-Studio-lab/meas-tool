@@ -100,6 +100,17 @@
       width: 2px;
       background: rgba(255,255,255,0.3);
     }
+    /* 校正模式標籤 */
+    .calib-mode-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 8px;
+    }
+    .calib-mode-badge.manual { background: #475569; color: #facc15; }
+    .calib-mode-badge.auto { background: #0d9488; color: #a7f3d0; }
     /* ========== 主內容區 ========== */
     #main {
       flex: 1;
@@ -214,6 +225,7 @@
       <button id="btn-toggle-scale" class="secondary">顯示半透明尺規</button>
       <button id="btn-finish-calib">完成校正</button>
       <button id="btn-recapture" class="secondary">重新開啟鏡頭</button>
+      <span id="calib-mode-badge" class="calib-mode-badge manual">手動尺規</span>
     </div>
     <!-- 相機進階控制（僅在瀏覽器支援時顯示） -->
     <div class="calib-row" id="camera-controls" style="display:none;">
@@ -231,7 +243,7 @@
         <div class="bar"><div class="bar-fill" id="level-bar" style="width:0%;"></div><div class="bar-center"></div></div>
       </div>
     </div>
-    <div class="hint" id="calib-hint">建議流程：開啟鏡頭 → 擷取含已知尺寸物件的影像 → 選「兩點距離」粗選已知長度（會即時顯示綠色區塊）→ 輸入實際尺寸 → 按「完成校正」。</div>
+    <div class="hint" id="calib-hint">建議流程：開啟鏡頭 → 擷取影像 → 選「兩點距離」或「圓形」在已知尺寸物件上點選（出現綠色區塊自動對邊）→ 輸入實際尺寸 → 按「完成校正」。</div>
   </div>
 
   <!-- 主區域 -->
@@ -292,6 +304,10 @@
     // 水平儀
     let levelAlpha = 0, levelBeta = 0, levelGamma = 0;
     let levelSupported = false;
+
+    // 校正模式追蹤
+    let lastCalibMethod = 'manual'; // 'manual' | 'auto-line' | 'auto-circle'
+    let lastPixelForCalib = 0;
 
     // ==================== 初始化鏡頭 ====================
     async function startCamera() {
@@ -373,14 +389,12 @@
       }
       
       window.addEventListener('deviceorientation', (e) => {
-        // alpha: Z軸旋轉(指北針), beta: X軸傾斜(前後), gamma: Y軸傾斜(左右)
         levelAlpha = e.alpha || 0;
-        levelBeta = e.beta || 0;    // 前後傾斜 -180~180
-        levelGamma = e.gamma || 0;  // 左右傾斜 -90~90
+        levelBeta = e.beta || 0;
+        levelGamma = e.gamma || 0;
         updateLevelUI();
       }, true);
       
-      // iOS 13+ 需要請求權限
       if (typeof DeviceOrientationEvent.requestPermission === 'function') {
         DeviceOrientationEvent.requestPermission().catch(() => {
           levelSupported = false;
@@ -392,7 +406,6 @@
     function updateLevelUI() {
       if (!levelSupported) return;
       
-      // 計算綜合傾斜角度（取 beta 和 gamma 的較大值）
       const tilt = Math.max(Math.abs(levelBeta), Math.abs(levelGamma));
       const valueEl = document.getElementById('level-value');
       const barEl = document.getElementById('level-bar');
@@ -400,11 +413,9 @@
       
       valueEl.textContent = tilt.toFixed(1) + '°';
       
-      // 進度條：0°=0%, 10°=100%
       const pct = Math.min(100, (tilt / 10) * 100);
       barEl.style.width = pct + '%';
       
-      // 顏色判斷
       if (tilt <= 1.5) {
         barEl.style.background = 'var(--level-ok)';
         indicator.style.borderColor = 'var(--level-ok)';
@@ -576,7 +587,7 @@
         octx.restore();
       }
 
-      // 2. 綠色區塊（校正/量測時都顯示，只要 isCaptured 且有 greenRegion）
+      // 2. 綠色區塊
       if (greenRegion && isCaptured) {
         octx.save();
         octx.fillStyle = 'rgba(34, 197, 94, 0.38)';
@@ -590,7 +601,6 @@
           octx.fillRect(greenRegion.x, greenRegion.y, greenRegion.w, greenRegion.h);
           octx.strokeRect(greenRegion.x, greenRegion.y, greenRegion.w, greenRegion.h);
         } else if (greenRegion.type === 'circle') {
-          // 圓形：實心填滿（而非環狀），確保小孔也在偵測範圍內
           octx.beginPath();
           octx.arc(greenRegion.cx, greenRegion.cy, greenRegion.r + greenRegion.expand, 0, Math.PI * 2);
           octx.fill();
@@ -623,16 +633,33 @@
             octx.strokeRect(i.x, i.y, i.w, i.h);
           }
         } else if (lastResult.tool === 'circle') {
-          if (lastResult.outerR) {
+          // 繪製所有偵測到的圓
+          if (lastResult.radii && lastResult.radii.length > 0) {
+            lastResult.radii.forEach((rad, idx) => {
+              octx.beginPath();
+              octx.arc(lastResult.cx, lastResult.cy, rad, 0, Math.PI * 2);
+              if (idx === 0) {
+                octx.strokeStyle = '#f472b6';
+                octx.lineWidth = 2;
+              } else {
+                octx.strokeStyle = '#a78bfa';
+                octx.lineWidth = 1.5;
+                octx.setLineDash([4, 3]);
+              }
+              octx.stroke();
+              octx.setLineDash([]);
+            });
+          } else if (lastResult.outerR) {
+            // 相容舊格式
             octx.beginPath();
             octx.arc(lastResult.cx, lastResult.cy, lastResult.outerR, 0, Math.PI * 2);
             octx.stroke();
-          }
-          if (lastResult.innerR) {
-            octx.setLineDash([4, 3]);
-            octx.beginPath();
-            octx.arc(lastResult.cx, lastResult.cy, lastResult.innerR, 0, Math.PI * 2);
-            octx.stroke();
+            if (lastResult.innerR) {
+              octx.setLineDash([4, 3]);
+              octx.beginPath();
+              octx.arc(lastResult.cx, lastResult.cy, lastResult.innerR, 0, Math.PI * 2);
+              octx.stroke();
+            }
           }
           drawCross(lastResult.cx, lastResult.cy);
         }
@@ -709,7 +736,7 @@
 
       if (lastPixelForCalib > 5) {
         pixelLen = lastPixelForCalib;
-        method = '自動邊緣偵測';
+        method = lastCalibMethod === 'auto-circle' ? '自動邊緣偵測(圓形)' : '自動邊緣偵測(線性)';
       } else if (scaleVisible) {
         if (scaleMode === 'line') {
           pixelLen = Math.hypot(lineScale.x2 - lineScale.x1, lineScale.y2 - lineScale.y1);
@@ -720,18 +747,33 @@
       }
 
       if (pixelLen < 5) {
-        alert('請先用「兩點距離」工具在已知尺寸的物件上選取兩點（會顯示綠色區塊並自動對邊），或開啟半透明尺規對齊後再按完成校正。');
+        alert('請先用「兩點距離」或「圓形」工具在已知尺寸的物件上選取（會顯示綠色區塊並自動對邊），或開啟半透明尺規對齊後再按完成校正。');
         return;
       }
 
       pixelsPerUnit = pixelLen / actual;
       scaleVisible = false;
       document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
+      updateCalibModeBadge('manual');
       updateHint(`校正完成！（${method}）比例 = ${pixelsPerUnit.toFixed(2)} px / ${currentUnit}。現在可以使用其他工具進行量測。`);
       document.getElementById('result-text').innerHTML =
         `校正完成<br>使用方式：${method}<br>像素距離：${pixelLen.toFixed(1)} px → 實際：${actual} ${currentUnit}<br>` +
         `比例：${pixelsPerUnit.toFixed(2)} px / ${currentUnit}`;
       drawOverlay();
+    }
+
+    function updateCalibModeBadge(mode) {
+      const badge = document.getElementById('calib-mode-badge');
+      if (mode === 'manual') {
+        badge.textContent = '手動尺規';
+        badge.className = 'calib-mode-badge manual';
+      } else if (mode === 'auto-line') {
+        badge.textContent = '自動邊緣(線性)';
+        badge.className = 'calib-mode-badge auto';
+      } else if (mode === 'auto-circle') {
+        badge.textContent = '自動邊緣(圓形)';
+        badge.className = 'calib-mode-badge auto';
+      }
     }
 
     // ==================== 擷取影像（完成後關閉相機） ====================
@@ -775,11 +817,10 @@
       lastResult = null;
       dragging = null;
 
-      // 更新 UI
       document.getElementById('btn-recapture').textContent = '重新開啟鏡頭';
       if (pixelsPerUnit <= 0) {
-        updateHint('影像已擷取（相機已關閉）。請選「兩點距離」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
-        document.getElementById('result-text').textContent = '尚未校正。請先用兩點距離選取已知長度完成校正。';
+        updateHint('影像已擷取（相機已關閉）。請選「兩點距離」或「圓形」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
+        document.getElementById('result-text').textContent = '尚未校正。請先用兩點距離或圓形選取已知長度完成校正。';
       } else {
         updateHint('影像已擷取（相機已關閉）。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。');
         document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
@@ -893,53 +934,69 @@
       return { outer, inner };
     }
 
+    // ==================== 圓形多邊緣偵測（新版：徑向輪廓峰值搜尋） ====================
     function autoEdgeCircle(cx, cy, r, expand) {
       const imgData = getImageDataSafe();
-      if (!imgData) return { cx, cy, outerR: r, innerR: null };
+      if (!imgData) return { cx, cy, radii: [] };
 
-      const angles = 36;
-      const outerSamples = [];
-      const innerSamples = [];
+      const angles = 72;  // 更高角度解析度
+      const radialProfile = [];  // 每個角度的徑向梯度陣列
+      const maxR = r + expand;
+      const minR = Math.max(3, r - expand);
 
+      // 建立每個角度的徑向梯度分佈
       for (let i = 0; i < angles; i++) {
         const ang = (i / angles) * Math.PI * 2;
         const cos = Math.cos(ang), sin = Math.sin(ang);
-        let bestOuter = r, bestG = -1;
-        let bestInner = r * 0.6, bestIG = -1;
-
-        for (let d = -expand; d <= expand; d++) {
-          const rad = r + d;
-          if (rad < 3) continue;
+        const profile = [];
+        for (let rad = minR; rad <= maxR; rad++) {
           const sx = cx + cos * rad;
           const sy = cy + sin * rad;
           const g = gradientAt(imgData, sx, sy);
-          if (g > bestG) { bestG = g; bestOuter = rad; }
+          profile.push({ r: rad, g });
         }
-        for (let d = 3; d < r * 0.7; d++) {
-          const rad = r - d;
-          if (rad < 3) break;
-          const sx = cx + cos * rad;
-          const sy = cy + sin * rad;
-          const g = gradientAt(imgData, sx, sy);
-          if (g > bestIG) { bestIG = g; bestInner = rad; }
-        }
-        outerSamples.push(bestOuter);
-        if (bestIG > 30) innerSamples.push(bestInner);
+        radialProfile.push(profile);
       }
 
-      outerSamples.sort((a,b)=>a-b);
-      const outerR = outerSamples[Math.floor(outerSamples.length/2)];
-
-      let innerR = null;
-      if (innerSamples.length > angles * 0.4) {
-        innerSamples.sort((a,b)=>a-b);
-        innerR = innerSamples[Math.floor(innerSamples.length/2)];
-        if (Math.abs(outerR - innerR) < 5) innerR = null;
+      // 將所有角度的徑向梯度平均，得到徑向輪廓
+      const avgProfile = [];
+      for (let radIdx = 0; radIdx < radialProfile[0].length; radIdx++) {
+        let sumG = 0;
+        for (let i = 0; i < angles; i++) {
+          sumG += radialProfile[i][radIdx].g;
+        }
+        avgProfile.push({
+          r: radialProfile[0][radIdx].r,
+          g: sumG / angles
+        });
       }
-      return { cx, cy, outerR, innerR };
+
+      // 找尋峰值（局部最大值）
+      const peaks = [];
+      for (let i = 1; i < avgProfile.length - 1; i++) {
+        if (avgProfile[i].g > avgProfile[i-1].g && avgProfile[i].g > avgProfile[i+1].g) {
+          // 檢查是否為顯著峰值（梯度強度大於鄰近平均的 1.3 倍）
+          const localAvg = (avgProfile[i-1].g + avgProfile[i+1].g) / 2;
+          if (avgProfile[i].g > localAvg * 1.3 && avgProfile[i].g > 20) {
+            peaks.push(avgProfile[i].r);
+          }
+        }
+      }
+
+      // 合併過近的峰值（容差 3px）
+      const mergedPeaks = [];
+      peaks.sort((a,b)=>a-b);
+      for (const p of peaks) {
+        if (mergedPeaks.length === 0 || p - mergedPeaks[mergedPeaks.length-1] > 3) {
+          mergedPeaks.push(p);
+        }
+      }
+
+      // 依半徑排序：最外層為外徑，內層依序為內徑1、內徑2...
+      mergedPeaks.sort((a,b)=>b-a);  // 大到小
+      
+      return { cx, cy, radii: mergedPeaks };
     }
-
-    let lastPixelForCalib = 0;
 
     // ==================== 執行量測 ====================
     function performMeasure() {
@@ -954,6 +1011,8 @@
         const edges = autoEdgeLine(p0.x, p0.y, p1.x, p1.y, bandW);
         const pixelDist = Math.hypot(edges.end.x - edges.start.x, edges.end.y - edges.start.y);
         lastPixelForCalib = pixelDist;
+        lastCalibMethod = 'auto-line';
+        updateCalibModeBadge('auto-line');
         lastResult = {
           tool: 'line', autoStart: edges.start, autoEnd: edges.end,
           pixel: pixelDist, real: pixelsPerUnit > 0 ? pixelDist / pixelsPerUnit : null
@@ -991,29 +1050,43 @@
           }
           document.getElementById('result-text').innerHTML = html;
         } else {
-          document.getElementById('result-text').innerHTML = `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」完成校正。`;
+          document.getElementById('result-text').innerHTML = `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」或「圓形」完成校正。`;
         }
       }
       else if (currentTool === 'circle') {
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const expand = 14;
-        // 綠色區塊：實心圓（半徑 r+expand），確保小孔也在範圍內
         greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: expand };
         const edges = autoEdgeCircle(p0.x, p0.y, r, expand);
-        lastResult = { tool: 'circle', ...edges };
+        lastPixelForCalib = edges.radii[0] * 2;  // 外徑作為校正基準
+        lastCalibMethod = 'auto-circle';
+        updateCalibModeBadge('auto-circle');
+        lastResult = { tool: 'circle', cx: edges.cx, cy: edges.cy, radii: edges.radii };
 
-        if (pixelsPerUnit > 0) {
-          const outerD = (edges.outerR * 2) / pixelsPerUnit;
-          let html = `圓形（自動邊緣）<br>外圓直徑：${outerD.toFixed(3)} ${currentUnit}`;
-          if (edges.innerR) {
-            const innerD = (edges.innerR * 2) / pixelsPerUnit;
-            const thick = (edges.outerR - edges.innerR) / pixelsPerUnit;
-            html += `<br>內圓直徑：${innerD.toFixed(3)} ${currentUnit}`;
-            html += `<br>壁厚：${thick.toFixed(3)} ${currentUnit}`;
-          }
+        if (pixelsPerUnit > 0 && edges.radii.length > 0) {
+          let html = `圓形（自動邊緣，偵測到 ${edges.radii.length} 個同心圓）<br>`;
+          edges.radii.forEach((rad, idx) => {
+            const d = (rad * 2) / pixelsPerUnit;
+            if (idx === 0) {
+              html += `外徑：<strong>${d.toFixed(3)} ${currentUnit}</strong><br>`;
+            } else {
+              const prevD = (edges.radii[0] * 2) / pixelsPerUnit;
+              const thick = ((edges.radii[0] - rad) / pixelsPerUnit).toFixed(3);
+              html += `內徑${idx}：${d.toFixed(3)} ${currentUnit}（壁厚 ${thick} ${currentUnit})<br>`;
+            }
+          });
+          document.getElementById('result-text').innerHTML = html;
+        } else if (edges.radii.length > 0) {
+          let html = `圓形邊緣已偵測（尚未校正，偵測到 ${edges.radii.length} 個同心圓）<br>`;
+          edges.radii.forEach((rad, idx) => {
+            const d = rad * 2;
+            if (idx === 0) html += `外徑像素：<strong>${d.toFixed(1)} px</strong><br>`;
+            else html += `內徑${idx}像素：${d.toFixed(1)} px<br>`;
+          });
+          html += `請先用「兩點距離」或「圓形」完成校正。`;
           document.getElementById('result-text').innerHTML = html;
         } else {
-          document.getElementById('result-text').innerHTML = `圓形邊緣已偵測（尚未校正）<br>請先用「兩點距離」完成校正。`;
+          document.getElementById('result-text').innerHTML = `未偵測到明顯圓形邊緣<br>請確認綠色區塊涵蓋目標圓環。`;
         }
       }
       drawOverlay();
@@ -1033,14 +1106,12 @@
         const pos = getPos(e);
 
         if (measurePoints.length === 0) {
-          // 第一次點擊：設定起點，立即建立綠色預覽區塊
           measurePoints = [pos];
           liveEnd = pos;
           greenRegion = null;
           lastResult = null;
           dragging = { type: 'measure-live' };
           
-          // 立即建立初始綠色區塊（起點=終點時的最小區塊）
           const bandW = 16;
           if (currentTool === 'line') {
             greenRegion = { type: 'band', x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, width: bandW };
@@ -1051,7 +1122,6 @@
           }
           drawOverlay();
         } else {
-          // 第二次點擊：確定終點並執行自動邊緣
           liveEnd = pos;
           measurePoints[1] = pos;
           dragging = null;
@@ -1165,11 +1235,12 @@
       isCaptured = false;
       video.style.display = 'block';
       canvas.style.display = 'none';
-      pixelsPerUnit = 0; lastPixelForCalib = 0;
+      pixelsPerUnit = 0; lastPixelForCalib = 0; lastCalibMethod = 'manual';
       scaleVisible = false;
       document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
+      updateCalibModeBadge('manual');
       measurePoints = []; liveEnd = null; greenRegion = null; lastResult = null; dragging = null;
-      updateHint('已重置。請重新擷取影像，用「兩點距離」選取已知尺寸物件後完成校正。');
+      updateHint('已重置。請重新擷取影像，用「兩點距離」或「圓形」選取已知尺寸物件後完成校正。');
       drawOverlay();
     });
 
