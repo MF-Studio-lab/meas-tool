@@ -185,7 +185,7 @@
       <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
       <span id="cam-capability-hint" style="font-size:11px; color:#64748b;"></span>
     </div>
-    <div class="hint" id="calib-hint">請先開啟鏡頭，輸入實際尺寸後拖曳半透明尺規與物件重合，再按「完成校正」。</div>
+    <div class="hint" id="calib-hint">建議流程：開啟鏡頭 → 擷取含已知尺寸物件的影像 → 選「兩點距離」粗選已知長度（會即時顯示綠色區塊）→ 輸入實際尺寸 → 按「完成校正」。</div>
   </div>
 
   <!-- 主區域 -->
@@ -238,7 +238,8 @@
     let dragging = null; // { type: 'line-end1'|'line-end2'|'circle-center'|'circle-radius', ... }
 
     // 量測狀態
-    let measurePoints = [];         // 當前工具的點
+    let measurePoints = [];         // 當前工具的點（最多存起點）
+    let liveEnd = null;             // 即時預覽的終點位置
     let greenRegion = null;         // 綠色區塊描述
     let lastResult = null;
 
@@ -436,62 +437,69 @@
     function drawOverlay() {
       octx.clearRect(0, 0, overlay.width, overlay.height);
 
-      // 1. 半透明尺規
+      // 1. 半透明尺規（提高可見度）
       if (scaleVisible && !isCaptured) {
         octx.save();
-        octx.globalAlpha = 0.45;
-        octx.strokeStyle = '#22d3ee';
-        octx.fillStyle = '#22d3ee';
-        octx.lineWidth = 2;
-        octx.setLineDash([6, 4]);
+        // 先畫一層半透明底，增加對比
+        octx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+        octx.fillRect(0, 0, overlay.width, overlay.height);
+
+        octx.globalAlpha = 0.92;
+        octx.strokeStyle = '#facc15';   // 亮黃色，更醒目
+        octx.fillStyle = '#facc15';
+        octx.lineWidth = 4;
+        octx.setLineDash([]);
 
         if (scaleMode === 'line') {
           octx.beginPath();
           octx.moveTo(lineScale.x1, lineScale.y1);
           octx.lineTo(lineScale.x2, lineScale.y2);
           octx.stroke();
-          // 兩端控制點
-          drawHandle(lineScale.x1, lineScale.y1);
-          drawHandle(lineScale.x2, lineScale.y2);
+          // 兩端控制點（更大更明顯）
+          drawHandle(lineScale.x1, lineScale.y1, 12);
+          drawHandle(lineScale.x2, lineScale.y2, 12);
           // 刻度示意
           const dx = lineScale.x2 - lineScale.x1;
           const dy = lineScale.y2 - lineScale.y1;
           const len = Math.hypot(dx, dy) || 1;
           const ux = dx / len, uy = dy / len;
+          octx.lineWidth = 3;
           for (let i = 0; i <= 10; i++) {
             const t = i / 10;
             const px = lineScale.x1 + dx * t;
             const py = lineScale.y1 + dy * t;
+            const tick = (i % 5 === 0) ? 14 : 8;
             octx.beginPath();
-            octx.moveTo(px - uy * 8, py + ux * 8);
-            octx.lineTo(px + uy * 8, py - ux * 8);
+            octx.moveTo(px - uy * tick, py + ux * tick);
+            octx.lineTo(px + uy * tick, py - ux * tick);
             octx.stroke();
           }
         } else {
           // 圓形尺規
+          octx.lineWidth = 4;
           octx.beginPath();
           octx.arc(circleScale.cx, circleScale.cy, circleScale.r, 0, Math.PI * 2);
           octx.stroke();
           // 十字中心
+          octx.lineWidth = 3;
           octx.beginPath();
-          octx.moveTo(circleScale.cx - 10, circleScale.cy);
-          octx.lineTo(circleScale.cx + 10, circleScale.cy);
-          octx.moveTo(circleScale.cx, circleScale.cy - 10);
-          octx.lineTo(circleScale.cx, circleScale.cy + 10);
+          octx.moveTo(circleScale.cx - 14, circleScale.cy);
+          octx.lineTo(circleScale.cx + 14, circleScale.cy);
+          octx.moveTo(circleScale.cx, circleScale.cy - 14);
+          octx.lineTo(circleScale.cx, circleScale.cy + 14);
           octx.stroke();
-          drawHandle(circleScale.cx, circleScale.cy);
-          // 半徑控制點
-          drawHandle(circleScale.cx + circleScale.r, circleScale.cy);
+          drawHandle(circleScale.cx, circleScale.cy, 12);
+          drawHandle(circleScale.cx + circleScale.r, circleScale.cy, 12);
         }
         octx.restore();
       }
 
-      // 2. 綠色半透明區塊（量測時）
+      // 2. 綠色半透明區塊（量測時，提高可見度）
       if (greenRegion && isCaptured) {
         octx.save();
-        octx.fillStyle = 'rgba(34, 197, 94, 0.28)';
-        octx.strokeStyle = 'rgba(34, 197, 94, 0.9)';
-        octx.lineWidth = 2;
+        octx.fillStyle = 'rgba(34, 197, 94, 0.38)';
+        octx.strokeStyle = 'rgba(22, 163, 74, 1)';
+        octx.lineWidth = 3;
         octx.setLineDash([]);
 
         if (greenRegion.type === 'band') {
@@ -581,12 +589,12 @@
       }
     }
 
-    function drawHandle(x, y) {
+    function drawHandle(x, y, radius = 9) {
       octx.beginPath();
-      octx.arc(x, y, 9, 0, Math.PI * 2);
+      octx.arc(x, y, radius, 0, Math.PI * 2);
       octx.fill();
       octx.strokeStyle = '#fff';
-      octx.lineWidth = 1.5;
+      octx.lineWidth = 2;
       octx.stroke();
     }
     function drawCross(x, y) {
@@ -617,20 +625,36 @@
         return;
       }
       currentUnit = document.getElementById('unit').value;
+
+      // 優先使用「自動邊緣偵測」得到的像素距離（降低人為誤差）
       let pixelLen = 0;
-      if (scaleMode === 'line') {
-        pixelLen = Math.hypot(lineScale.x2 - lineScale.x1, lineScale.y2 - lineScale.y1);
-      } else {
-        pixelLen = circleScale.r * 2; // 使用直徑
+      let method = '';
+
+      if (lastPixelForCalib > 5) {
+        pixelLen = lastPixelForCalib;
+        method = '自動邊緣偵測';
+      } else if (scaleVisible) {
+        // 後備：使用手動尺規
+        if (scaleMode === 'line') {
+          pixelLen = Math.hypot(lineScale.x2 - lineScale.x1, lineScale.y2 - lineScale.y1);
+        } else {
+          pixelLen = circleScale.r * 2;
+        }
+        method = '手動尺規';
       }
+
       if (pixelLen < 5) {
-        alert('尺規太小，請拉大後再校正');
+        alert('請先用「兩點距離」工具在已知尺寸的物件上選取兩點（會顯示綠色區塊並自動對邊），或開啟半透明尺規對齊後再按完成校正。');
         return;
       }
+
       pixelsPerUnit = pixelLen / actual;
       scaleVisible = false;
       document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
-      updateHint(`校正完成！比例 = ${pixelsPerUnit.toFixed(2)} px / ${currentUnit}。請按「擷取影像」後開始量測。`);
+      updateHint(`校正完成！（${method}）比例 = ${pixelsPerUnit.toFixed(2)} px / ${currentUnit}。現在可以使用其他工具進行量測。`);
+      document.getElementById('result-text').innerHTML =
+        `校正完成<br>使用方式：${method}<br>像素距離：${pixelLen.toFixed(1)} px → 實際：${actual} ${currentUnit}<br>` +
+        `比例：${pixelsPerUnit.toFixed(2)} px / ${currentUnit}`;
       drawOverlay();
     }
 
@@ -667,10 +691,17 @@
       canvas.style.display = 'block';
       isCaptured = true;
       measurePoints = [];
+      liveEnd = null;
       greenRegion = null;
       lastResult = null;
-      updateHint('影像已擷取。請選擇工具，在影像上粗略操作，系統會以綠色區塊自動偵測邊緣並計算尺寸。');
-      document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
+      dragging = null;
+      if (pixelsPerUnit <= 0) {
+        updateHint('影像已擷取。請選「兩點距離」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
+        document.getElementById('result-text').textContent = '尚未校正。請先用兩點距離選取已知長度完成校正。';
+      } else {
+        updateHint('影像已擷取。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。');
+        document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
+      }
       drawOverlay();
     }
 
@@ -847,34 +878,45 @@
       return { cx, cy, outerR, innerR };
     }
 
+    // 最近一次自動邊緣得到的像素距離（供校正使用）
+    let lastPixelForCalib = 0;
+
     // ==================== 執行量測（綠色區塊 + 自動邊緣） ====================
     function performMeasure() {
-      if (!isCaptured || pixelsPerUnit <= 0) {
-        alert('請先完成校正並擷取影像');
+      if (!isCaptured) {
+        alert('請先擷取影像');
         return;
       }
-      if (measurePoints.length < 2) return;
-
       const p0 = measurePoints[0];
-      const p1 = measurePoints[1];
-      const bandW = 14; // 綠色半寬
+      const p1 = measurePoints[1] || liveEnd;
+      if (!p0 || !p1) return;
+      const bandW = 16; // 綠色半寬
 
       if (currentTool === 'line') {
         greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: p1.x, y2: p1.y, width: bandW };
         const edges = autoEdgeLine(p0.x, p0.y, p1.x, p1.y, bandW);
         const pixelDist = Math.hypot(edges.end.x - edges.start.x, edges.end.y - edges.start.y);
-        const real = pixelDist / pixelsPerUnit;
+        lastPixelForCalib = pixelDist;
         lastResult = {
           tool: 'line',
           autoStart: edges.start,
           autoEnd: edges.end,
           pixel: pixelDist,
-          real: real
+          real: pixelsPerUnit > 0 ? pixelDist / pixelsPerUnit : null
         };
-        document.getElementById('result-text').innerHTML =
-          `兩點距離（自動邊緣）<br>` +
-          `像素距離：${pixelDist.toFixed(1)} px<br>` +
-          `<strong>實際尺寸：${real.toFixed(3)} ${currentUnit}</strong>`;
+
+        if (pixelsPerUnit > 0) {
+          const real = pixelDist / pixelsPerUnit;
+          document.getElementById('result-text').innerHTML =
+            `兩點距離（自動邊緣）<br>` +
+            `像素距離：${pixelDist.toFixed(1)} px<br>` +
+            `<strong>實際尺寸：${real.toFixed(3)} ${currentUnit}</strong>`;
+        } else {
+          document.getElementById('result-text').innerHTML =
+            `校正用兩點距離（自動邊緣）<br>` +
+            `偵測到像素距離：<strong>${pixelDist.toFixed(1)} px</strong><br>` +
+            `請在上方輸入此段的「實際尺寸」，然後按「完成校正」。`;
+        }
       }
       else if (currentTool === 'rect') {
         const x = Math.min(p0.x, p1.x);
@@ -886,18 +928,23 @@
         const edges = autoEdgeRect(x, y, w, h, expand);
         lastResult = { tool: 'rect', ...edges };
 
-        const ow = edges.outer.w / pixelsPerUnit;
-        const oh = edges.outer.h / pixelsPerUnit;
-        let html = `矩形（自動邊緣）<br>外框：${ow.toFixed(3)} × ${oh.toFixed(3)} ${currentUnit}`;
-        if (edges.inner) {
-          const iw = edges.inner.w / pixelsPerUnit;
-          const ih = edges.inner.h / pixelsPerUnit;
-          const thickW = (edges.outer.w - edges.inner.w) / 2 / pixelsPerUnit;
-          const thickH = (edges.outer.h - edges.inner.h) / 2 / pixelsPerUnit;
-          html += `<br>內框：${iw.toFixed(3)} × ${ih.toFixed(3)} ${currentUnit}`;
-          html += `<br>壁厚（約）：水平 ${thickW.toFixed(3)} / 垂直 ${thickH.toFixed(3)} ${currentUnit}`;
+        if (pixelsPerUnit > 0) {
+          const ow = edges.outer.w / pixelsPerUnit;
+          const oh = edges.outer.h / pixelsPerUnit;
+          let html = `矩形（自動邊緣）<br>外框：${ow.toFixed(3)} × ${oh.toFixed(3)} ${currentUnit}`;
+          if (edges.inner) {
+            const iw = edges.inner.w / pixelsPerUnit;
+            const ih = edges.inner.h / pixelsPerUnit;
+            const thickW = (edges.outer.w - edges.inner.w) / 2 / pixelsPerUnit;
+            const thickH = (edges.outer.h - edges.inner.h) / 2 / pixelsPerUnit;
+            html += `<br>內框：${iw.toFixed(3)} × ${ih.toFixed(3)} ${currentUnit}`;
+            html += `<br>壁厚（約）：水平 ${thickW.toFixed(3)} / 垂直 ${thickH.toFixed(3)} ${currentUnit}`;
+          }
+          document.getElementById('result-text').innerHTML = html;
+        } else {
+          document.getElementById('result-text').innerHTML =
+            `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
         }
-        document.getElementById('result-text').innerHTML = html;
       }
       else if (currentTool === 'circle') {
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
@@ -906,15 +953,20 @@
         const edges = autoEdgeCircle(p0.x, p0.y, r, expand);
         lastResult = { tool: 'circle', ...edges };
 
-        const outerD = (edges.outerR * 2) / pixelsPerUnit;
-        let html = `圓形（自動邊緣）<br>外圓直徑：${outerD.toFixed(3)} ${currentUnit}`;
-        if (edges.innerR) {
-          const innerD = (edges.innerR * 2) / pixelsPerUnit;
-          const thick = (edges.outerR - edges.innerR) / pixelsPerUnit;
-          html += `<br>內圓直徑：${innerD.toFixed(3)} ${currentUnit}`;
-          html += `<br>壁厚：${thick.toFixed(3)} ${currentUnit}`;
+        if (pixelsPerUnit > 0) {
+          const outerD = (edges.outerR * 2) / pixelsPerUnit;
+          let html = `圓形（自動邊緣）<br>外圓直徑：${outerD.toFixed(3)} ${currentUnit}`;
+          if (edges.innerR) {
+            const innerD = (edges.innerR * 2) / pixelsPerUnit;
+            const thick = (edges.outerR - edges.innerR) / pixelsPerUnit;
+            html += `<br>內圓直徑：${innerD.toFixed(3)} ${currentUnit}`;
+            html += `<br>壁厚：${thick.toFixed(3)} ${currentUnit}`;
+          }
+          document.getElementById('result-text').innerHTML = html;
+        } else {
+          document.getElementById('result-text').innerHTML =
+            `圓形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
         }
-        document.getElementById('result-text').innerHTML = html;
       }
       drawOverlay();
     }
@@ -932,40 +984,50 @@
 
     // 尺規拖曳
     function onPointerDown(e) {
-      if (!scaleVisible || isCaptured) {
-        // 量測模式
-        if (!isCaptured || !currentTool || pixelsPerUnit <= 0) return;
+      // 量測 / 校正選取模式（已擷取影像後）
+      if (isCaptured && currentTool) {
         e.preventDefault();
         const pos = getPos(e);
-        if (measurePoints.length >= 2) measurePoints = [];
-        measurePoints.push(pos);
-        if (measurePoints.length === 2) {
-          performMeasure();
-        } else {
+
+        if (measurePoints.length === 0) {
+          // 第一次點擊：設定起點，開始即時綠色預覽
+          measurePoints = [pos];
+          liveEnd = pos;
           greenRegion = null;
           lastResult = null;
+          dragging = { type: 'measure-live' };
           drawOverlay();
+        } else {
+          // 第二次點擊：確定終點並執行自動邊緣
+          liveEnd = pos;
+          measurePoints[1] = pos;
+          dragging = null;
+          performMeasure();
+          // 保持結果，下次點擊再重新開始
+          measurePoints = [];
+          liveEnd = null;
         }
         return;
       }
 
-      // 校正模式拖曳
-      e.preventDefault();
-      const pos = getPos(e);
-      const hitR = 18;
-      if (scaleMode === 'line') {
-        if (Math.hypot(pos.x - lineScale.x1, pos.y - lineScale.y1) < hitR) dragging = { type: 'line-end1' };
-        else if (Math.hypot(pos.x - lineScale.x2, pos.y - lineScale.y2) < hitR) dragging = { type: 'line-end2' };
-        else {
-          // 檢查是否點在線上，整體移動
-          const d = pointToSegmentDist(pos, lineScale.x1, lineScale.y1, lineScale.x2, lineScale.y2);
-          if (d < 12) dragging = { type: 'line-move', ox: pos.x, oy: pos.y, lx1: lineScale.x1, ly1: lineScale.y1, lx2: lineScale.x2, ly2: lineScale.y2 };
-        }
-      } else {
-        if (Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) < hitR) dragging = { type: 'circle-center' };
-        else if (Math.hypot(pos.x - (circleScale.cx + circleScale.r), pos.y - circleScale.cy) < hitR) dragging = { type: 'circle-radius' };
-        else if (Math.abs(Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) - circleScale.r) < 12) {
-          dragging = { type: 'circle-radius' };
+      // 舊有尺規拖曳（校正輔助，可選）
+      if (scaleVisible && !isCaptured) {
+        e.preventDefault();
+        const pos = getPos(e);
+        const hitR = 20;
+        if (scaleMode === 'line') {
+          if (Math.hypot(pos.x - lineScale.x1, pos.y - lineScale.y1) < hitR) dragging = { type: 'line-end1' };
+          else if (Math.hypot(pos.x - lineScale.x2, pos.y - lineScale.y2) < hitR) dragging = { type: 'line-end2' };
+          else {
+            const d = pointToSegmentDist(pos, lineScale.x1, lineScale.y1, lineScale.x2, lineScale.y2);
+            if (d < 14) dragging = { type: 'line-move', ox: pos.x, oy: pos.y, lx1: lineScale.x1, ly1: lineScale.y1, lx2: lineScale.x2, ly2: lineScale.y2 };
+          }
+        } else {
+          if (Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) < hitR) dragging = { type: 'circle-center' };
+          else if (Math.hypot(pos.x - (circleScale.cx + circleScale.r), pos.y - circleScale.cy) < hitR) dragging = { type: 'circle-radius' };
+          else if (Math.abs(Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) - circleScale.r) < 14) {
+            dragging = { type: 'circle-radius' };
+          }
         }
       }
     }
@@ -974,6 +1036,31 @@
       if (!dragging) return;
       e.preventDefault();
       const pos = getPos(e);
+
+      // 量測即時綠色區塊預覽（點選起點後持續顯示）
+      if (dragging.type === 'measure-live' && measurePoints.length >= 1 && currentTool) {
+        const p0 = measurePoints[0];
+        const bandW = 16;
+        liveEnd = pos;
+
+        if (currentTool === 'line') {
+          greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: pos.x, y2: pos.y, width: bandW };
+        } else if (currentTool === 'rect') {
+          const x = Math.min(p0.x, pos.x);
+          const y = Math.min(p0.y, pos.y);
+          const w = Math.abs(pos.x - p0.x);
+          const h = Math.abs(pos.y - p0.y);
+          const expand = 12;
+          greenRegion = { type: 'rect', x: x - expand, y: y - expand, w: w + expand * 2, h: h + expand * 2 };
+        } else if (currentTool === 'circle') {
+          const r = Math.hypot(pos.x - p0.x, pos.y - p0.y);
+          greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: 14 };
+        }
+        drawOverlay();
+        return;
+      }
+
+      // 尺規拖曳
       if (dragging.type === 'line-end1') {
         lineScale.x1 = pos.x; lineScale.y1 = pos.y;
       } else if (dragging.type === 'line-end2') {
@@ -990,7 +1077,13 @@
       drawOverlay();
     }
 
-    function onPointerUp() { dragging = null; }
+    function onPointerUp(e) {
+      if (dragging && dragging.type === 'measure-live') {
+        // 保持 measure-live 直到第二次點擊，不在這裡清除
+        return;
+      }
+      dragging = null;
+    }
 
     function pointToSegmentDist(p, x1, y1, x2, y2) {
       const dx = x2 - x1, dy = y2 - y1;
@@ -1026,8 +1119,10 @@
     document.getElementById('btn-capture').addEventListener('click', captureImage);
     document.getElementById('btn-clear').addEventListener('click', () => {
       measurePoints = [];
+      liveEnd = null;
       greenRegion = null;
       lastResult = null;
+      dragging = null;
       document.getElementById('result-text').textContent = '已清除量測。';
       drawOverlay();
     });
@@ -1036,12 +1131,15 @@
       video.style.display = 'block';
       canvas.style.display = 'none';
       pixelsPerUnit = 0;
-      scaleVisible = true;
-      document.getElementById('btn-toggle-scale').textContent = '隱藏半透明尺規';
+      lastPixelForCalib = 0;
+      scaleVisible = false;
+      document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
       measurePoints = [];
+      liveEnd = null;
       greenRegion = null;
       lastResult = null;
-      updateHint('已回到校正模式。請重新拖曳尺規重合後按「完成校正」。');
+      dragging = null;
+      updateHint('已重置。請重新擷取影像，用「兩點距離」選取已知尺寸物件後完成校正。');
       drawOverlay();
     });
 
@@ -1063,10 +1161,12 @@
         btn.classList.add('active');
         currentTool = btn.dataset.tool;
         measurePoints = [];
+        liveEnd = null;
         greenRegion = null;
         lastResult = null;
+        dragging = null;
         drawOverlay();
-        updateHint(`已選擇「${btn.textContent}」工具。在影像上點選兩點（或拖曳）進行粗略選取，系統會顯示綠色區塊並自動計算邊緣。`);
+        updateHint(`已選擇「${btn.textContent}」。點選起點後會即時顯示綠色邊緣範圍，移動確認涵蓋正確後再點選終點，系統會自動對邊計算。`);
       });
     });
 
