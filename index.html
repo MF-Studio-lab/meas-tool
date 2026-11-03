@@ -960,20 +960,165 @@
       return Math.max(-0.5, Math.min(0.5, d));
     }
 
-    // 圓形：沿多條射線做強度梯度 → 中位數半徑 + 亞像素 + 圓心精修
-    function autoEdgeCircle(cx, cy, r, expand) {
-      const imgData = getImageDataSafe();
-      if (!imgData) return { cx, cy, radii: [r], outerR: r, innerR: null };
+    // 代數圓擬合（x²+y² + D x + E y + F = 0）→ 回傳 {cx, cy, r} 或 null
+    function fitCircleAlgebraic(pts) {
+      const n = pts.length;
+      if (n < 12) return null;
+      let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumXY = 0;
+      let sumX3 = 0, sumY3 = 0, sumX2Y = 0, sumXY2 = 0;
+      for (const p of pts) {
+        const x = p.x, y = p.y;
+        sumX += x; sumY += y;
+        sumX2 += x * x; sumY2 += y * y; sumXY += x * y;
+        sumX3 += x * x * x; sumY3 += y * y * y;
+        sumX2Y += x * x * y; sumXY2 += x * y * y;
+      }
+      const A = n * sumX2 - sumX * sumX;
+      const B = n * sumXY - sumX * sumY;
+      const C = n * sumY2 - sumY * sumY;
+      const G = 0.5 * (n * sumX3 + n * sumXY2 - sumX * sumX2 - sumX * sumY2);
+      const H = 0.5 * (n * sumY3 + n * sumX2Y - sumY * sumX2 - sumY * sumY2);
+      const det = A * C - B * B;
+      if (Math.abs(det) < 1e-8) return null;
+      const d = (G * C - H * B) / det;
+      const e = (A * H - B * G) / det;
+      const ncx = -d, ncy = -e;
+      // 半徑取到擬合中心的中位數距離
+      const rs = pts.map(p => Math.hypot(p.x - ncx, p.y - ncy)).sort((a, b) => a - b);
+      return { cx: ncx, cy: ncy, r: rs[Math.floor(rs.length / 2)] };
+    }
 
-      const maxR = Math.max(r + expand, 10);
+    /**
+     * 在綠色選取範圍內自動找圓心（不依賴手指起點）
+     * 作法：
+     *  1) 在粗選環帶收集強邊緣點
+     *  2) 代數擬合得到候選圓心
+     *  3) 在粗選中心附近網格搜尋，以「各向半徑一致 + 邊緣強」打分，取最佳
+     */
+    function findAutoCenter(imgData, roughCx, roughCy, roughR, expand) {
+      const rMin = Math.max(4, roughR - expand);
+      const rMax = roughR + expand;
+      const edgePts = [];
+      // 環帶內掃描強邊緣（步長 1px，夠快）
+      const x0 = Math.max(1, Math.floor(roughCx - rMax));
+      const x1 = Math.min(imgData.width - 2, Math.ceil(roughCx + rMax));
+      const y0 = Math.max(1, Math.floor(roughCy - rMax));
+      const y1 = Math.min(imgData.height - 2, Math.ceil(roughCy + rMax));
+      const minG = getEdgeThreshold() * 0.9;
+
+      for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+          const dist = Math.hypot(x - roughCx, y - roughCy);
+          if (dist < rMin || dist > rMax) continue;
+          const g = gradientAt(imgData, x, y);
+          if (g < minG) continue;
+          // 局部極大（3x3）才保留，減少雜點
+          let isMax = true;
+          for (let dy = -1; dy <= 1 && isMax; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              if (gradientAt(imgData, x + dx, y + dy) > g) { isMax = false; break; }
+            }
+          }
+          if (isMax) edgePts.push({ x, y, g });
+        }
+      }
+
+      // 只留梯度較強的前 60% 點，避免弱反光干擾擬合
+      edgePts.sort((a, b) => b.g - a.g);
+      const keep = edgePts.slice(0, Math.max(24, Math.floor(edgePts.length * 0.6)));
+
+      let bestCx = roughCx, bestCy = roughCy, bestR = roughR;
+      const fitted = fitCircleAlgebraic(keep);
+      if (fitted && Math.hypot(fitted.cx - roughCx, fitted.cy - roughCy) < Math.max(roughR * 0.35, 20)) {
+        bestCx = fitted.cx;
+        bestCy = fitted.cy;
+        bestR = fitted.r;
+      }
+
+      // 網格微搜：在擬合中心附近找「各向半徑變異最小、邊緣最穩」的點
+      const searchRad = Math.min(14, Math.max(6, roughR * 0.12));
+      const gridStep = searchRad > 10 ? 2 : 1;
+      let bestScore = -1;
+      const scoreAngles = 24;
+
+      function scoreCenter(tcx, tcy) {
+        const rs = [];
+        let sumG = 0;
+        for (let i = 0; i < scoreAngles; i++) {
+          const ang = (i / scoreAngles) * Math.PI * 2;
+          const cos = Math.cos(ang), sin = Math.sin(ang);
+          let bestLocalR = bestR, bestLocalG = -1;
+          for (let d = -expand; d <= expand; d += 1) {
+            const rad = bestR + d;
+            if (rad < 3) continue;
+            const g1 = sampleGray(imgData, tcx + cos * (rad - 0.5), tcy + sin * (rad - 0.5));
+            const g2 = sampleGray(imgData, tcx + cos * (rad + 0.5), tcy + sin * (rad + 0.5));
+            const deriv = Math.abs(g2 - g1) * edgeGain;
+            if (deriv > bestLocalG) {
+              bestLocalG = deriv;
+              bestLocalR = rad;
+            }
+          }
+          rs.push(bestLocalR);
+          sumG += bestLocalG;
+        }
+        // 標準差越小越好（圓心越準），平均梯度越大越好
+        const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+        let varSum = 0;
+        for (const v of rs) varSum += (v - mean) * (v - mean);
+        const std = Math.sqrt(varSum / rs.length);
+        return { score: (sumG / rs.length) / (1 + std * 1.8), meanR: mean, std };
+      }
+
+      // 先評分目前最佳
+      {
+        const s = scoreCenter(bestCx, bestCy);
+        bestScore = s.score;
+        bestR = s.meanR;
+      }
+
+      for (let dy = -searchRad; dy <= searchRad; dy += gridStep) {
+        for (let dx = -searchRad; dx <= searchRad; dx += gridStep) {
+          if (dx === 0 && dy === 0) continue;
+          const tcx = bestCx + dx;
+          const tcy = bestCy + dy;
+          // 必須仍大致落在綠色粗選範圍內
+          if (Math.hypot(tcx - roughCx, tcy - roughCy) > Math.max(roughR * 0.4, 24)) continue;
+          const s = scoreCenter(tcx, tcy);
+          if (s.score > bestScore) {
+            bestScore = s.score;
+            bestCx = tcx;
+            bestCy = tcy;
+            bestR = s.meanR;
+          }
+        }
+      }
+
+      return { cx: bestCx, cy: bestCy, r: bestR };
+    }
+
+    // 圓形：綠色範圍僅作 ROI → 自動找圓心 → 多層半徑（不依賴手指起點當圓心）
+    function autoEdgeCircle(roughCx, roughCy, roughR, expand) {
+      const imgData = getImageDataSafe();
+      if (!imgData) return { cx: roughCx, cy: roughCy, radii: [roughR], outerR: roughR, innerR: null };
+
+      // ---- 0) 自動圓心（核心：不採用手指起點）----
+      const autoC = findAutoCenter(imgData, roughCx, roughCy, roughR, expand);
+      const cx = autoC.cx;
+      const cy = autoC.cy;
+      // 外徑搜尋以自動估計半徑為主，仍參考使用者粗選半徑
+      const r = autoC.r > 3 ? autoC.r : roughR;
+
+      const maxR = Math.max(r + expand, roughR + expand, 10);
       const minR = 2;
-      const angles = 72;          // 更多角度提升圓度與抗雜訊
-      const step = 0.5;          // 半像素徑向取樣
+      const angles = 72;
+      const step = 0.5;
       const nBins = Math.floor((maxR - minR) / step) + 1;
-      const profile = new Float32Array(nBins); // 平均 |dI/dr|
+      const profile = new Float32Array(nBins);
       const profileCnt = new Uint16Array(nBins);
 
-      // ---- 1) 徑向強度梯度剖面（比單純 Sobel 更對準「圓形邊界」）----
+      // ---- 1) 徑向強度梯度剖面 ----
       for (let i = 0; i < angles; i++) {
         const ang = (i / angles) * Math.PI * 2;
         const cos = Math.cos(ang), sin = Math.sin(ang);
@@ -991,15 +1136,14 @@
         if (profileCnt[bi] > 0) profile[bi] = (profile[bi] / profileCnt[bi]) * edgeGain;
       }
 
-      // ---- 2) 找剖面峰值並亞像素精修 ----
-      const threshold = Math.max(2.5, getEdgeThreshold() * 0.08); // 強度差門檻（較適合 dI/dr）
-      // 動態門檻：取剖面 85 百分位的一定比例，避免固定值在不同曝光失效
+      // ---- 2) 峰值 + 亞像素 ----
+      const threshold = Math.max(2.5, getEdgeThreshold() * 0.08);
       const sortedP = Array.from(profile).filter(v => v > 0).sort((a, b) => a - b);
       const p85 = sortedP.length ? sortedP[Math.floor(sortedP.length * 0.85)] : threshold;
       const peakTh = Math.max(threshold, p85 * 0.35);
 
       const peaks = [];
-      const minPeakDistBins = Math.max(3, Math.round(3 / step)); // ~1.5px
+      const minPeakDistBins = Math.max(3, Math.round(3 / step));
       for (let bi = 2; bi < nBins - 2; bi++) {
         const v = profile[bi];
         if (v < peakTh) continue;
@@ -1019,17 +1163,16 @@
       }
 
       if (peaks.length === 0) {
-        return { cx, cy, radii: [r], outerR: r, innerR: null };
+        return { cx, cy, radii: [r], outerR: r, innerR: null, autoCenter: true };
       }
 
-      // ---- 3) 外徑：優先取「靠近使用者拖曳半徑 r」且夠強的峰，避免吃到外圈反光 ----
-      // 搜尋範圍：r ± expand，若無則退回最強峰
+      // ---- 3) 外徑：靠近自動估計 r（或使用者粗選）的強峰 ----
       let outerPeak = null;
       let bestScore = -1;
+      const refR = r;
       for (const p of peaks) {
-        const dist = Math.abs(p.r - r);
-        if (dist <= expand + 2) {
-          // 強度高、距離使用者指定半徑近 → 分數高
+        const dist = Math.abs(p.r - refR);
+        if (dist <= expand + 4) {
           const score = p.g / (1 + dist * 0.35);
           if (score > bestScore) {
             bestScore = score;
@@ -1038,19 +1181,17 @@
         }
       }
       if (!outerPeak) {
-        // 退回：取 r 附近最接近者，再不然取最大半徑峰
-        peaks.sort((a, b) => Math.abs(a.r - r) - Math.abs(b.r - r));
+        peaks.sort((a, b) => Math.abs(a.r - refR) - Math.abs(b.r - refR));
         outerPeak = peaks[0];
       }
 
-      // ---- 4) 以各角度在 outer 附近精修，並估計更準的圓心 ----
+      // ---- 4) 各角度精修外徑 ----
       const rayRs = [];
-      const edgePts = [];
       const searchHalf = Math.min(expand, 10);
       for (let i = 0; i < angles; i++) {
         const ang = (i / angles) * Math.PI * 2;
         const cos = Math.cos(ang), sin = Math.sin(ang);
-        let bestR = outerPeak.r, bestD = -1;
+        let bestLocalR = outerPeak.r, bestD = -1;
         for (let d = -searchHalf; d <= searchHalf; d += 0.5) {
           const rad = outerPeak.r + d;
           if (rad < 3) continue;
@@ -1059,87 +1200,35 @@
           const deriv = Math.abs(g2 - g1);
           if (deriv > bestD) {
             bestD = deriv;
-            bestR = rad;
+            bestLocalR = rad;
           }
         }
-        if (bestD > peakTh * 0.5) {
-          rayRs.push(bestR);
-          edgePts.push({
-            x: cx + cos * bestR,
-            y: cy + sin * bestR
-          });
-        }
+        if (bestD > peakTh * 0.5) rayRs.push(bestLocalR);
       }
-
-      // 圓心精修：邊緣點幾何平均（對近似圓足夠穩）
-      let refinedCx = cx, refinedCy = cy;
-      if (edgePts.length >= 12) {
-        let sx = 0, sy = 0;
-        for (const p of edgePts) { sx += p.x; sy += p.y; }
-        // 用「邊緣點平均」會偏向圓心，但需再以半徑一致性微調
-        // 改：固定用原 cx,cy 為主，僅做小幅偏移估計
-        // 簡單代數：對 x^2+y^2 圓擬合的簡化一步
-        let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumXY = 0, sumX3 = 0, sumY3 = 0, sumX2Y = 0, sumXY2 = 0;
-        const n = edgePts.length;
-        for (const p of edgePts) {
-          const x = p.x, y = p.y;
-          sumX += x; sumY += y;
-          sumX2 += x * x; sumY2 += y * y; sumXY += x * y;
-          sumX3 += x * x * x; sumY3 += y * y * y;
-          sumX2Y += x * x * y; sumXY2 += x * y * y;
-        }
-        // 解圓：x^2+y^2 + D x + E y + F = 0
-        const A = n * sumX2 - sumX * sumX;
-        const B = n * sumXY - sumX * sumY;
-        const C = n * sumY2 - sumY * sumY;
-        const G = 0.5 * (n * sumX3 + n * sumXY2 - sumX * sumX2 - sumX * sumY2);
-        const H = 0.5 * (n * sumY3 + n * sumX2Y - sumY * sumX2 - sumY * sumY2);
-        const det = A * C - B * B;
-        if (Math.abs(det) > 1e-6) {
-          const d = (G * C - H * B) / det;
-          const e = (A * H - B * G) / det;
-          const ncx = -d;
-          const ncy = -e;
-          // 僅在偏移不大時採用（避免亂跳）
-          if (Math.hypot(ncx - cx, ncy - cy) < Math.max(6, r * 0.08)) {
-            refinedCx = ncx;
-            refinedCy = ncy;
-          }
-        }
-        // 以精修圓心重算各點半徑中位數
-        const rs2 = edgePts.map(p => Math.hypot(p.x - refinedCx, p.y - refinedCy));
-        rs2.sort((a, b) => a - b);
-        rayRs.length = 0;
-        for (const v of rs2) rayRs.push(v);
-      }
-
       rayRs.sort((a, b) => a - b);
-      const outerR = rayRs.length
-        ? rayRs[Math.floor(rayRs.length / 2)]
-        : outerPeak.r;
+      const outerR = rayRs.length ? rayRs[Math.floor(rayRs.length / 2)] : outerPeak.r;
 
-      // ---- 5) 其餘內徑峰：在 outer 以內、強度夠、與外徑有間隔 ----
+      // ---- 5) 內徑多層 ----
       const innerPeaks = peaks
         .filter(p => p.r < outerR - 3 && p.g >= peakTh * 0.7)
         .sort((a, b) => b.r - a.r);
 
-      // 對每個內徑峰也做射線中位數精修（較省：只用 36 角）
       const refinedInners = [];
       for (const ip of innerPeaks) {
         const irs = [];
         for (let i = 0; i < 36; i++) {
           const ang = (i / 36) * Math.PI * 2;
           const cos = Math.cos(ang), sin = Math.sin(ang);
-          let bestR = ip.r, bestD = -1;
+          let bestLocalR = ip.r, bestD = -1;
           for (let d = -4; d <= 4; d += 0.5) {
             const rad = ip.r + d;
             if (rad < 2 || rad > outerR - 2) continue;
-            const g1 = sampleGray(imgData, refinedCx + cos * (rad - 0.5), refinedCy + sin * (rad - 0.5));
-            const g2 = sampleGray(imgData, refinedCx + cos * (rad + 0.5), refinedCy + sin * (rad + 0.5));
+            const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
+            const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
             const deriv = Math.abs(g2 - g1);
-            if (deriv > bestD) { bestD = deriv; bestR = rad; }
+            if (deriv > bestD) { bestD = deriv; bestLocalR = rad; }
           }
-          if (bestD > peakTh * 0.4) irs.push(bestR);
+          if (bestD > peakTh * 0.4) irs.push(bestLocalR);
         }
         if (irs.length >= 10) {
           irs.sort((a, b) => a - b);
@@ -1147,20 +1236,19 @@
         }
       }
 
-      // 去重（間隔至少 2px）
       const radii = [outerR];
       for (const ir of refinedInners) {
         if (radii.every(x => Math.abs(x - ir) >= 2)) radii.push(ir);
       }
       radii.sort((a, b) => b - a);
 
-      const innerR = radii.length > 1 ? radii[1] : null;
       return {
-        cx: refinedCx,
-        cy: refinedCy,
+        cx,
+        cy,
         radii,
         outerR: radii[0],
-        innerR
+        innerR: radii.length > 1 ? radii[1] : null,
+        autoCenter: true
       };
     }
 
@@ -1525,7 +1613,9 @@
         dragging = null;
         showEdgeGainControls(false);
         drawOverlay();
-        updateHint(`已選擇「${btn.textContent}」。手機：按住起點拖到終點再放開即可；桌面也可點兩下。拖曳時會顯示綠色範圍，放開後自動對邊。完成後可用邊緣增益微調。`);
+        updateHint(currentTool === 'circle'
+          ? `已選擇「圓形」。拖出綠色範圍包住目標圓即可，圓心由邊緣自動計算（不依手指起點），可避免偏心。完成後可用邊緣增益微調。`
+          : `已選擇「${btn.textContent}」。手機：按住起點拖到終點再放開即可；桌面也可點兩下。拖曳時顯示綠色範圍，放開後自動對邊。完成後可用邊緣增益微調。`);
       });
     });
 
