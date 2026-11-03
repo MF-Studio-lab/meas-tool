@@ -13,6 +13,9 @@
       --panel: #1e293b;
       --text: #f1f5f9;
       --muted: #94a3b8;
+      --level-ok: #22c55e;
+      --level-warn: #facc15;
+      --level-bad: #ef4444;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -64,6 +67,39 @@
     button.secondary { background: #475569; }
     button.danger { background: #dc2626; }
     .hint { font-size: 12px; color: #38bdf8; width: 100%; }
+    /* 水平儀顯示 */
+    #level-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(0,0,0,0.3);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      min-width: 140px;
+    }
+    #level-indicator .label { color: var(--muted); font-size: 11px; }
+    #level-indicator .value { font-weight: 600; font-size: 14px; }
+    #level-indicator .bar {
+      width: 80px;
+      height: 6px;
+      background: #334155;
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+    #level-indicator .bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.1s, background 0.1s;
+    }
+    #level-indicator .bar-center {
+      position: absolute;
+      top: 0; bottom: 0; left: 50%;
+      width: 2px;
+      background: rgba(255,255,255,0.3);
+    }
     /* ========== 主內容區 ========== */
     #main {
       flex: 1;
@@ -153,6 +189,8 @@
       }
       #result-panel { font-size: 13px; }
       input[type="number"] { width: 70px; }
+      #level-indicator { font-size: 12px; min-width: 120px; }
+      #level-indicator .bar { width: 60px; }
     }
   </style>
 </head>
@@ -184,6 +222,14 @@
       <span id="zoom-value" style="display:none; font-size:12px; color:#94a3b8;">1.0x</span>
       <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
       <span id="cam-capability-hint" style="font-size:11px; color:#64748b;"></span>
+    </div>
+    <!-- 水平儀（手機版顯示） -->
+    <div class="calib-row" id="level-row" style="display:none; justify-content: flex-end;">
+      <div id="level-indicator" title="請保持手機水平，傾斜會影響測量精度">
+        <span class="label">水平</span>
+        <span class="value" id="level-value">0.0°</span>
+        <div class="bar"><div class="bar-fill" id="level-bar" style="width:0%;"></div><div class="bar-center"></div></div>
+      </div>
     </div>
     <div class="hint" id="calib-hint">建議流程：開啟鏡頭 → 擷取含已知尺寸物件的影像 → 選「兩點距離」粗選已知長度（會即時顯示綠色區塊）→ 輸入實際尺寸 → 按「完成校正」。</div>
   </div>
@@ -223,50 +269,50 @@
     const octx = overlay.getContext('2d');
 
     let stream = null;
-    let videoTrack = null;          // 目前的 video track，用來套用 zoom / torch
+    let videoTrack = null;
     let isCaptured = false;
-    let pixelsPerUnit = 0;          // 校正後：每單位實際長度對應的像素數
+    let pixelsPerUnit = 0;
     let currentUnit = 'mm';
     let scaleVisible = false;
-    let scaleMode = 'line';         // 'line' | 'circle'
-    let currentTool = null;         // 'line' | 'rect' | 'circle' | null
+    let scaleMode = 'line';
+    let currentTool = null;
     let torchOn = false;
 
     // 尺規狀態
-    let lineScale = { x1: 80, y1: 120, x2: 280, y2: 120 }; // 水平尺規預設
+    let lineScale = { x1: 80, y1: 120, x2: 280, y2: 120 };
     let circleScale = { cx: 200, cy: 200, r: 80 };
-    let dragging = null; // { type: 'line-end1'|'line-end2'|'circle-center'|'circle-radius', ... }
+    let dragging = null;
 
     // 量測狀態
-    let measurePoints = [];         // 當前工具的點（最多存起點）
-    let liveEnd = null;             // 即時預覽的終點位置
-    let greenRegion = null;         // 綠色區塊描述
+    let measurePoints = [];
+    let liveEnd = null;
+    let greenRegion = null;
     let lastResult = null;
+
+    // 水平儀
+    let levelAlpha = 0, levelBeta = 0, levelGamma = 0;
+    let levelSupported = false;
 
     // ==================== 初始化鏡頭 ====================
     async function startCamera() {
-      // 檢查是否為安全環境（HTTPS 或 localhost）
       const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
       
       if (!isSecure) {
         const currentUrl = location.href;
-        const msg = `目前不是安全環境，無法使用相機。\n\n目前網址：${currentUrl}\n\n原因：手機瀏覽器只允許在 HTTPS 或 localhost 下開啟相機。\n透過 http://樹莓派IP 存取屬於非安全連線，瀏覽器會直接封鎖 getUserMedia。\n\n【推薦解決方法（由快到穩）】\n1. 使用 cloudflared 或 ngrok 建立暫時 HTTPS 隧道（最快，約1分鐘）\n2. 在樹莓派設定自簽 HTTPS 憑證\n3. 把檔案放到 GitHub Pages / Netlify 等免費 HTTPS 空間\n\n詳細步驟請看後續說明。`;
+        const msg = `目前不是安全環境，無法使用相機。\n\n目前網址：${currentUrl}\n\n原因：手機瀏覽器只允許在 HTTPS 或 localhost 下開啟相機。\n透過 http://樹莓派IP 存取屬於非安全連線，瀏覽器會直接封鎖 getUserMedia。\n\n【推薦解決方法（由快到穩）】\n1. 使用 cloudflared 或 ngrok 建立暫時 HTTPS 隧道（最快，約1分鐘）\n2. 在樹莓派設定自簽 HTTPS 憑證\n3. 把檔案放到 GitHub Pages / Netlify 等免費 HTTPS 空間`;
         alert(msg);
         updateHint('請改用 HTTPS 連線。目前為 http://IP 非安全環境，相機被瀏覽器封鎖。');
         document.getElementById('result-text').textContent = '相機無法使用：需要 HTTPS 環境（目前為 http://IP）。';
         return;
       }
 
-      // 檢查 mediaDevices 支援
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        // 嘗試舊版 API（極少數舊瀏覽器）
         const getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.msGetUserMedia;
         if (!getUserMedia) {
           alert('此瀏覽器不支援相機存取（getUserMedia）。\n請改用最新版 Chrome、Safari 或 Edge。');
           updateHint('瀏覽器不支援相機 API。');
           return;
         }
-        // 舊版 callback 寫法（很少需要）
         alert('偵測到較舊的瀏覽器 API，建議更新瀏覽器以獲得最佳體驗。');
       }
 
@@ -277,7 +323,7 @@
 
         const constraints = {
           video: {
-            facingMode: { ideal: 'environment' },  // 優先後置鏡頭
+            facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 }
           },
@@ -292,9 +338,9 @@
         pixelsPerUnit = 0;
         torchOn = false;
 
-        // 取得 video track 並偵測可用能力
         videoTrack = stream.getVideoTracks()[0] || null;
         setupCameraControls(videoTrack);
+        setupLevelListener();
 
         updateHint('鏡頭已開啟。請輸入實際尺寸，顯示並拖曳半透明尺規與物件重合後按「完成校正」。');
         document.getElementById('result-text').textContent = '請先完成校正並擷取影像。';
@@ -316,7 +362,62 @@
       }
     }
 
-    // ==================== 相機進階控制（變焦 / 補光） ====================
+    // ==================== 水平儀監聽 ====================
+    function setupLevelListener() {
+      if (!window.DeviceOrientationEvent) return;
+      
+      levelSupported = true;
+      const levelRow = document.getElementById('level-row');
+      if (window.innerWidth <= 768) {
+        levelRow.style.display = 'flex';
+      }
+      
+      window.addEventListener('deviceorientation', (e) => {
+        // alpha: Z軸旋轉(指北針), beta: X軸傾斜(前後), gamma: Y軸傾斜(左右)
+        levelAlpha = e.alpha || 0;
+        levelBeta = e.beta || 0;    // 前後傾斜 -180~180
+        levelGamma = e.gamma || 0;  // 左右傾斜 -90~90
+        updateLevelUI();
+      }, true);
+      
+      // iOS 13+ 需要請求權限
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().catch(() => {
+          levelSupported = false;
+          document.getElementById('level-row').style.display = 'none';
+        });
+      }
+    }
+
+    function updateLevelUI() {
+      if (!levelSupported) return;
+      
+      // 計算綜合傾斜角度（取 beta 和 gamma 的較大值）
+      const tilt = Math.max(Math.abs(levelBeta), Math.abs(levelGamma));
+      const valueEl = document.getElementById('level-value');
+      const barEl = document.getElementById('level-bar');
+      const indicator = document.getElementById('level-indicator');
+      
+      valueEl.textContent = tilt.toFixed(1) + '°';
+      
+      // 進度條：0°=0%, 10°=100%
+      const pct = Math.min(100, (tilt / 10) * 100);
+      barEl.style.width = pct + '%';
+      
+      // 顏色判斷
+      if (tilt <= 1.5) {
+        barEl.style.background = 'var(--level-ok)';
+        indicator.style.borderColor = 'var(--level-ok)';
+      } else if (tilt <= 5) {
+        barEl.style.background = 'var(--level-warn)';
+        indicator.style.borderColor = 'var(--level-warn)';
+      } else {
+        barEl.style.background = 'var(--level-bad)';
+        indicator.style.borderColor = 'var(--level-bad)';
+      }
+    }
+
+    // ==================== 相機進階控制 ====================
     function setupCameraControls(track) {
       const controls = document.getElementById('camera-controls');
       const zoomLabel = document.getElementById('zoom-label');
@@ -325,7 +426,6 @@
       const btnTorch = document.getElementById('btn-torch');
       const hint = document.getElementById('cam-capability-hint');
 
-      // 先全部隱藏
       controls.style.display = 'none';
       zoomLabel.style.display = 'none';
       zoomSlider.style.display = 'none';
@@ -343,7 +443,6 @@
       let hasAny = false;
       let messages = [];
 
-      // 變焦（Zoom）
       if (caps.zoom) {
         const min = caps.zoom.min || 1;
         const max = caps.zoom.max || 1;
@@ -363,7 +462,6 @@
         messages.push('無變焦');
       }
 
-      // 補光燈 / Torch（持續照明，非閃光）
       if (caps.torch) {
         btnTorch.style.display = 'inline-block';
         btnTorch.textContent = '開啟補光';
@@ -372,7 +470,6 @@
         messages.push('無補光燈');
       }
 
-      // 其他常見但多數不支援的項目
       if (!caps.focusMode && !caps.focusDistance) messages.push('無手動對焦');
       if (!caps.iso) messages.push('無 ISO');
       if (!caps.exposureCompensation && !caps.exposureMode) messages.push('無曝光控制');
@@ -386,18 +483,14 @@
       }
     }
 
-    // 套用變焦
     async function applyZoom(value) {
       if (!videoTrack) return;
       try {
         await videoTrack.applyConstraints({ advanced: [{ zoom: Number(value) }] });
         document.getElementById('zoom-value').textContent = Number(value).toFixed(1) + 'x';
-      } catch (e) {
-        console.warn('變焦失敗', e);
-      }
+      } catch (e) { console.warn('變焦失敗', e); }
     }
 
-    // 開關補光燈
     async function toggleTorch() {
       if (!videoTrack) return;
       try {
@@ -423,29 +516,22 @@
       overlay.height = h;
       overlay.style.width = w + 'px';
       overlay.style.height = h + 'px';
-      if (isCaptured) {
-        // 保持 canvas 與影像比例
-        drawOverlay();
-      } else {
-        // 預覽時也畫尺規
-        drawOverlay();
-      }
+      drawOverlay();
     }
     window.addEventListener('resize', resizeOverlay);
 
-    // ==================== 繪製覆蓋層（尺規 + 綠色區塊 + 量測標記） ====================
+    // ==================== 繪製覆蓋層 ====================
     function drawOverlay() {
       octx.clearRect(0, 0, overlay.width, overlay.height);
 
-      // 1. 半透明尺規（提高可見度）
+      // 1. 半透明尺規
       if (scaleVisible && !isCaptured) {
         octx.save();
-        // 先畫一層半透明底，增加對比
         octx.fillStyle = 'rgba(0, 0, 0, 0.25)';
         octx.fillRect(0, 0, overlay.width, overlay.height);
 
         octx.globalAlpha = 0.92;
-        octx.strokeStyle = '#facc15';   // 亮黃色，更醒目
+        octx.strokeStyle = '#facc15';
         octx.fillStyle = '#facc15';
         octx.lineWidth = 4;
         octx.setLineDash([]);
@@ -455,10 +541,8 @@
           octx.moveTo(lineScale.x1, lineScale.y1);
           octx.lineTo(lineScale.x2, lineScale.y2);
           octx.stroke();
-          // 兩端控制點（更大更明顯）
           drawHandle(lineScale.x1, lineScale.y1, 12);
           drawHandle(lineScale.x2, lineScale.y2, 12);
-          // 刻度示意
           const dx = lineScale.x2 - lineScale.x1;
           const dy = lineScale.y2 - lineScale.y1;
           const len = Math.hypot(dx, dy) || 1;
@@ -475,12 +559,10 @@
             octx.stroke();
           }
         } else {
-          // 圓形尺規
           octx.lineWidth = 4;
           octx.beginPath();
           octx.arc(circleScale.cx, circleScale.cy, circleScale.r, 0, Math.PI * 2);
           octx.stroke();
-          // 十字中心
           octx.lineWidth = 3;
           octx.beginPath();
           octx.moveTo(circleScale.cx - 14, circleScale.cy);
@@ -494,7 +576,7 @@
         octx.restore();
       }
 
-      // 2. 綠色半透明區塊（量測時，提高可見度）
+      // 2. 綠色區塊（校正/量測時都顯示，只要 isCaptured 且有 greenRegion）
       if (greenRegion && isCaptured) {
         octx.save();
         octx.fillStyle = 'rgba(34, 197, 94, 0.38)';
@@ -503,24 +585,21 @@
         octx.setLineDash([]);
 
         if (greenRegion.type === 'band') {
-          // 帶狀（兩點距離）
           drawBand(greenRegion.x1, greenRegion.y1, greenRegion.x2, greenRegion.y2, greenRegion.width);
         } else if (greenRegion.type === 'rect') {
           octx.fillRect(greenRegion.x, greenRegion.y, greenRegion.w, greenRegion.h);
           octx.strokeRect(greenRegion.x, greenRegion.y, greenRegion.w, greenRegion.h);
         } else if (greenRegion.type === 'circle') {
+          // 圓形：實心填滿（而非環狀），確保小孔也在偵測範圍內
           octx.beginPath();
           octx.arc(greenRegion.cx, greenRegion.cy, greenRegion.r + greenRegion.expand, 0, Math.PI * 2);
-          octx.arc(greenRegion.cx, greenRegion.cy, Math.max(0, greenRegion.r - greenRegion.expand), 0, Math.PI * 2, true);
-          octx.fill('evenodd');
-          octx.beginPath();
-          octx.arc(greenRegion.cx, greenRegion.cy, greenRegion.r + greenRegion.expand, 0, Math.PI * 2);
+          octx.fill();
           octx.stroke();
         }
         octx.restore();
       }
 
-      // 3. 量測標記與自動邊緣點
+      // 3. 量測結果標記
       if (lastResult && isCaptured) {
         octx.save();
         octx.strokeStyle = '#f472b6';
@@ -560,14 +639,13 @@
         octx.restore();
       }
 
-      // 4. 當前正在畫的臨時圖形
+      // 4. 臨時圖形
       if (measurePoints.length > 0 && currentTool) {
         octx.save();
         octx.strokeStyle = '#a78bfa';
         octx.lineWidth = 1.5;
         octx.setLineDash([4, 3]);
         if (currentTool === 'line' && measurePoints.length === 1) {
-          // 等第二點
         } else if (currentTool === 'line' && measurePoints.length === 2) {
           octx.beginPath();
           octx.moveTo(measurePoints[0].x, measurePoints[0].y);
@@ -626,7 +704,6 @@
       }
       currentUnit = document.getElementById('unit').value;
 
-      // 優先使用「自動邊緣偵測」得到的像素距離（降低人為誤差）
       let pixelLen = 0;
       let method = '';
 
@@ -634,7 +711,6 @@
         pixelLen = lastPixelForCalib;
         method = '自動邊緣偵測';
       } else if (scaleVisible) {
-        // 後備：使用手動尺規
         if (scaleMode === 'line') {
           pixelLen = Math.hypot(lineScale.x2 - lineScale.x1, lineScale.y2 - lineScale.y1);
         } else {
@@ -658,7 +734,7 @@
       drawOverlay();
     }
 
-    // ==================== 擷取影像 ====================
+    // ==================== 擷取影像（完成後關閉相機） ====================
     function captureImage() {
       if (!stream) {
         alert('請先開啟鏡頭');
@@ -670,7 +746,6 @@
         alert('鏡頭尚未就緒，請稍候再試');
         return;
       }
-      // 將 video 畫到 canvas，保持比例並置中於 overlay 尺寸
       const area = document.getElementById('image-area');
       const rect = area.getBoundingClientRect();
       const areaW = rect.width;
@@ -687,6 +762,10 @@
       ctx.fillRect(0, 0, areaW, areaH);
       ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
 
+      // 關閉相機串流
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      videoTrack = null;
       video.style.display = 'none';
       canvas.style.display = 'block';
       isCaptured = true;
@@ -695,24 +774,24 @@
       greenRegion = null;
       lastResult = null;
       dragging = null;
+
+      // 更新 UI
+      document.getElementById('btn-recapture').textContent = '重新開啟鏡頭';
       if (pixelsPerUnit <= 0) {
-        updateHint('影像已擷取。請選「兩點距離」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
+        updateHint('影像已擷取（相機已關閉）。請選「兩點距離」，在已知尺寸物件上點選起點→移動確認綠色範圍→點選終點，再輸入實際尺寸並按「完成校正」。');
         document.getElementById('result-text').textContent = '尚未校正。請先用兩點距離選取已知長度完成校正。';
       } else {
-        updateHint('影像已擷取。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。');
+        updateHint('影像已擷取（相機已關閉）。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。');
         document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
       }
       drawOverlay();
     }
 
-    // ==================== 簡易邊緣偵測（純 JS，降低人為誤差） ====================
-    // 在指定區域內找梯度最強的點
+    // ==================== 邊緣偵測 ====================
     function getImageDataSafe() {
       try {
         return ctx.getImageData(0, 0, canvas.width, canvas.height);
-      } catch (e) {
-        return null;
-      }
+      } catch (e) { return null; }
     }
 
     function gradientAt(imgData, x, y) {
@@ -721,7 +800,6 @@
       y = Math.max(1, Math.min(h - 2, Math.round(y)));
       const idx = (y * w + x) * 4;
       const data = imgData.data;
-      // 簡單 Sobel 近似（灰階）
       const gray = (i) => 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
       const tl = gray(idx - w*4 - 4), tc = gray(idx - w*4), tr = gray(idx - w*4 + 4);
       const ml = gray(idx - 4),           mr = gray(idx + 4);
@@ -731,7 +809,6 @@
       return Math.abs(gx) + Math.abs(gy);
     }
 
-    // 兩點距離：在帶狀區域兩端找最強邊緣點
     function autoEdgeLine(x1, y1, x2, y2, bandWidth) {
       const imgData = getImageDataSafe();
       if (!imgData) return { start: {x:x1,y:y1}, end: {x:x2,y:y2} };
@@ -739,7 +816,7 @@
       const dx = x2 - x1, dy = y2 - y1;
       const len = Math.hypot(dx, dy) || 1;
       const ux = dx / len, uy = dy / len;
-      const px = -uy, py = ux; // 垂直方向
+      const px = -uy, py = ux;
 
       function findStrongestNear(cx, cy, searchRadius) {
         let best = { x: cx, y: cy, g: -1 };
@@ -748,7 +825,6 @@
             const ang = (a / 16) * Math.PI * 2;
             const sx = cx + Math.cos(ang) * r;
             const sy = cy + Math.sin(ang) * r;
-            // 限制在帶狀內
             const proj = ((sx - x1) * ux + (sy - y1) * uy);
             if (proj < -5 || proj > len + 5) continue;
             const distToLine = Math.abs((sx - x1) * px + (sy - y1) * py);
@@ -766,14 +842,10 @@
       return { start: { x: start.x, y: start.y }, end: { x: end.x, y: end.y } };
     }
 
-    // 矩形：在四邊擴張區域找強邊緣，嘗試偵測內外
     function autoEdgeRect(rx, ry, rw, rh, expand) {
       const imgData = getImageDataSafe();
-      if (!imgData) {
-        return { outer: { x: rx, y: ry, w: rw, h: rh }, inner: null };
-      }
+      if (!imgData) return { outer: { x: rx, y: ry, w: rw, h: rh }, inner: null };
 
-      // 簡化：對每條邊取中點附近最強梯度位置，微調邊界
       function sampleEdge(x0, y0, x1, y1, outwardX, outwardY) {
         const samples = [];
         const steps = 12;
@@ -790,7 +862,6 @@
           }
           samples.push(bestD);
         }
-        // 取中位數
         samples.sort((a,b)=>a-b);
         return samples[Math.floor(samples.length/2)];
       }
@@ -801,13 +872,10 @@
       const botD   = sampleEdge(rx, ry+rh, rx+rw, ry+rh, 0, 1);
 
       const outer = {
-        x: rx + leftD,
-        y: ry + topD,
-        w: rw + (rightD - leftD),
-        h: rh + (botD - topD)
+        x: rx + leftD, y: ry + topD,
+        w: rw + (rightD - leftD), h: rh + (botD - topD)
       };
 
-      // 嘗試找內框：在更內側再搜一次（簡化版，實際可再優化）
       let inner = null;
       if (rw > 30 && rh > 30) {
         const inset = Math.min(rw, rh) * 0.15;
@@ -817,20 +885,14 @@
         const iTop   = sampleEdge(ix, iy, ix+iw, iy, 0, -1);
         const iBot   = sampleEdge(ix, iy+ih, ix+iw, iy+ih, 0, 1);
         inner = {
-          x: ix + iLeft,
-          y: iy + iTop,
-          w: iw + (iRight - iLeft),
-          h: ih + (iBot - iTop)
+          x: ix + iLeft, y: iy + iTop,
+          w: iw + (iRight - iLeft), h: ih + (iBot - iTop)
         };
-        // 若內外差異太小則忽略內框
-        if (Math.abs(inner.w - outer.w) < 4 && Math.abs(inner.h - outer.h) < 4) {
-          inner = null;
-        }
+        if (Math.abs(inner.w - outer.w) < 4 && Math.abs(inner.h - outer.h) < 4) inner = null;
       }
       return { outer, inner };
     }
 
-    // 圓形：在環狀區域找內外半徑
     function autoEdgeCircle(cx, cy, r, expand) {
       const imgData = getImageDataSafe();
       if (!imgData) return { cx, cy, outerR: r, innerR: null };
@@ -853,7 +915,6 @@
           const g = gradientAt(imgData, sx, sy);
           if (g > bestG) { bestG = g; bestOuter = rad; }
         }
-        // 內側再搜一輪
         for (let d = 3; d < r * 0.7; d++) {
           const rad = r - d;
           if (rad < 3) break;
@@ -878,19 +939,15 @@
       return { cx, cy, outerR, innerR };
     }
 
-    // 最近一次自動邊緣得到的像素距離（供校正使用）
     let lastPixelForCalib = 0;
 
-    // ==================== 執行量測（綠色區塊 + 自動邊緣） ====================
+    // ==================== 執行量測 ====================
     function performMeasure() {
-      if (!isCaptured) {
-        alert('請先擷取影像');
-        return;
-      }
+      if (!isCaptured) { alert('請先擷取影像'); return; }
       const p0 = measurePoints[0];
       const p1 = measurePoints[1] || liveEnd;
       if (!p0 || !p1) return;
-      const bandW = 16; // 綠色半寬
+      const bandW = 16;
 
       if (currentTool === 'line') {
         greenRegion = { type: 'band', x1: p0.x, y1: p0.y, x2: p1.x, y2: p1.y, width: bandW };
@@ -898,24 +955,16 @@
         const pixelDist = Math.hypot(edges.end.x - edges.start.x, edges.end.y - edges.start.y);
         lastPixelForCalib = pixelDist;
         lastResult = {
-          tool: 'line',
-          autoStart: edges.start,
-          autoEnd: edges.end,
-          pixel: pixelDist,
-          real: pixelsPerUnit > 0 ? pixelDist / pixelsPerUnit : null
+          tool: 'line', autoStart: edges.start, autoEnd: edges.end,
+          pixel: pixelDist, real: pixelsPerUnit > 0 ? pixelDist / pixelsPerUnit : null
         };
 
         if (pixelsPerUnit > 0) {
-          const real = pixelDist / pixelsPerUnit;
           document.getElementById('result-text').innerHTML =
-            `兩點距離（自動邊緣）<br>` +
-            `像素距離：${pixelDist.toFixed(1)} px<br>` +
-            `<strong>實際尺寸：${real.toFixed(3)} ${currentUnit}</strong>`;
+            `兩點距離（自動邊緣）<br>像素距離：${pixelDist.toFixed(1)} px<br><strong>實際尺寸：${(pixelDist/pixelsPerUnit).toFixed(3)} ${currentUnit}</strong>`;
         } else {
           document.getElementById('result-text').innerHTML =
-            `校正用兩點距離（自動邊緣）<br>` +
-            `偵測到像素距離：<strong>${pixelDist.toFixed(1)} px</strong><br>` +
-            `請在上方輸入此段的「實際尺寸」，然後按「完成校正」。`;
+            `校正用兩點距離（自動邊緣）<br>偵測到像素距離：<strong>${pixelDist.toFixed(1)} px</strong><br>請在上方輸入此段的「實際尺寸」，然後按「完成校正」。`;
         }
       }
       else if (currentTool === 'rect') {
@@ -938,17 +987,17 @@
             const thickW = (edges.outer.w - edges.inner.w) / 2 / pixelsPerUnit;
             const thickH = (edges.outer.h - edges.inner.h) / 2 / pixelsPerUnit;
             html += `<br>內框：${iw.toFixed(3)} × ${ih.toFixed(3)} ${currentUnit}`;
-            html += `<br>壁厚（約）：水平 ${thickW.toFixed(3)} / 垂直 ${thickH.toFixed(3)} ${currentUnit}`;
+            html += `<br>壁厚：水平 ${thickW.toFixed(3)} / 垂直 ${thickH.toFixed(3)} ${currentUnit}`;
           }
           document.getElementById('result-text').innerHTML = html;
         } else {
-          document.getElementById('result-text').innerHTML =
-            `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
+          document.getElementById('result-text').innerHTML = `矩形邊緣已偵測（尚未校正）<br>請先用「兩點距離」完成校正。`;
         }
       }
       else if (currentTool === 'circle') {
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const expand = 14;
+        // 綠色區塊：實心圓（半徑 r+expand），確保小孔也在範圍內
         greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: expand };
         const edges = autoEdgeCircle(p0.x, p0.y, r, expand);
         lastResult = { tool: 'circle', ...edges };
@@ -964,8 +1013,7 @@
           }
           document.getElementById('result-text').innerHTML = html;
         } else {
-          document.getElementById('result-text').innerHTML =
-            `圓形邊緣已偵測（尚未校正）<br>請先用「兩點距離」對已知尺寸物件完成校正。`;
+          document.getElementById('result-text').innerHTML = `圓形邊緣已偵測（尚未校正）<br>請先用「兩點距離」完成校正。`;
         }
       }
       drawOverlay();
@@ -976,26 +1024,31 @@
       const rect = overlay.getBoundingClientRect();
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      return {
-        x: clientX - rect.left,
-        y: clientY - rect.top
-      };
+      return { x: clientX - rect.left, y: clientY - rect.top };
     }
 
-    // 尺規拖曳
     function onPointerDown(e) {
-      // 量測 / 校正選取模式（已擷取影像後）
       if (isCaptured && currentTool) {
         e.preventDefault();
         const pos = getPos(e);
 
         if (measurePoints.length === 0) {
-          // 第一次點擊：設定起點，開始即時綠色預覽
+          // 第一次點擊：設定起點，立即建立綠色預覽區塊
           measurePoints = [pos];
           liveEnd = pos;
           greenRegion = null;
           lastResult = null;
           dragging = { type: 'measure-live' };
+          
+          // 立即建立初始綠色區塊（起點=終點時的最小區塊）
+          const bandW = 16;
+          if (currentTool === 'line') {
+            greenRegion = { type: 'band', x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, width: bandW };
+          } else if (currentTool === 'rect') {
+            greenRegion = { type: 'rect', x: pos.x - 12, y: pos.y - 12, w: 24, h: 24 };
+          } else if (currentTool === 'circle') {
+            greenRegion = { type: 'circle', cx: pos.x, cy: pos.y, r: 0, expand: 14 };
+          }
           drawOverlay();
         } else {
           // 第二次點擊：確定終點並執行自動邊緣
@@ -1003,14 +1056,12 @@
           measurePoints[1] = pos;
           dragging = null;
           performMeasure();
-          // 保持結果，下次點擊再重新開始
           measurePoints = [];
           liveEnd = null;
         }
         return;
       }
 
-      // 舊有尺規拖曳（校正輔助，可選）
       if (scaleVisible && !isCaptured) {
         e.preventDefault();
         const pos = getPos(e);
@@ -1037,7 +1088,6 @@
       e.preventDefault();
       const pos = getPos(e);
 
-      // 量測即時綠色區塊預覽（點選起點後持續顯示）
       if (dragging.type === 'measure-live' && measurePoints.length >= 1 && currentTool) {
         const p0 = measurePoints[0];
         const bandW = 16;
@@ -1051,7 +1101,7 @@
           const w = Math.abs(pos.x - p0.x);
           const h = Math.abs(pos.y - p0.y);
           const expand = 12;
-          greenRegion = { type: 'rect', x: x - expand, y: y - expand, w: w + expand * 2, h: h + expand * 2 };
+          greenRegion = { type: 'rect', x: x - expand, y: y - expand, w: w + expand*2, h: h + expand*2 };
         } else if (currentTool === 'circle') {
           const r = Math.hypot(pos.x - p0.x, pos.y - p0.y);
           greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: 14 };
@@ -1060,28 +1110,19 @@
         return;
       }
 
-      // 尺規拖曳
-      if (dragging.type === 'line-end1') {
-        lineScale.x1 = pos.x; lineScale.y1 = pos.y;
-      } else if (dragging.type === 'line-end2') {
-        lineScale.x2 = pos.x; lineScale.y2 = pos.y;
-      } else if (dragging.type === 'line-move') {
+      if (dragging.type === 'line-end1') { lineScale.x1 = pos.x; lineScale.y1 = pos.y; }
+      else if (dragging.type === 'line-end2') { lineScale.x2 = pos.x; lineScale.y2 = pos.y; }
+      else if (dragging.type === 'line-move') {
         const dx = pos.x - dragging.ox, dy = pos.y - dragging.oy;
         lineScale.x1 = dragging.lx1 + dx; lineScale.y1 = dragging.ly1 + dy;
         lineScale.x2 = dragging.lx2 + dx; lineScale.y2 = dragging.ly2 + dy;
-      } else if (dragging.type === 'circle-center') {
-        circleScale.cx = pos.x; circleScale.cy = pos.y;
-      } else if (dragging.type === 'circle-radius') {
-        circleScale.r = Math.max(10, Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy));
-      }
+      } else if (dragging.type === 'circle-center') { circleScale.cx = pos.x; circleScale.cy = pos.y; }
+      else if (dragging.type === 'circle-radius') { circleScale.r = Math.max(10, Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy)); }
       drawOverlay();
     }
 
     function onPointerUp(e) {
-      if (dragging && dragging.type === 'measure-live') {
-        // 保持 measure-live 直到第二次點擊，不在這裡清除
-        return;
-      }
+      if (dragging && dragging.type === 'measure-live') return;
       dragging = null;
     }
 
@@ -1094,7 +1135,6 @@
       return Math.hypot(p.x - px, p.y - py);
     }
 
-    // 綁定事件
     overlay.style.pointerEvents = 'auto';
     overlay.addEventListener('mousedown', onPointerDown);
     overlay.addEventListener('mousemove', onPointerMove);
@@ -1104,7 +1144,6 @@
     overlay.addEventListener('touchmove', onPointerMove, { passive: false });
     overlay.addEventListener('touchend', onPointerUp);
 
-    // 按鈕事件
     document.getElementById('btn-toggle-scale').addEventListener('click', () => {
       scaleVisible = !scaleVisible;
       document.getElementById('btn-toggle-scale').textContent = scaleVisible ? '隱藏半透明尺規' : '顯示半透明尺規';
@@ -1118,11 +1157,7 @@
     });
     document.getElementById('btn-capture').addEventListener('click', captureImage);
     document.getElementById('btn-clear').addEventListener('click', () => {
-      measurePoints = [];
-      liveEnd = null;
-      greenRegion = null;
-      lastResult = null;
-      dragging = null;
+      measurePoints = []; liveEnd = null; greenRegion = null; lastResult = null; dragging = null;
       document.getElementById('result-text').textContent = '已清除量測。';
       drawOverlay();
     });
@@ -1130,41 +1165,25 @@
       isCaptured = false;
       video.style.display = 'block';
       canvas.style.display = 'none';
-      pixelsPerUnit = 0;
-      lastPixelForCalib = 0;
+      pixelsPerUnit = 0; lastPixelForCalib = 0;
       scaleVisible = false;
       document.getElementById('btn-toggle-scale').textContent = '顯示半透明尺規';
-      measurePoints = [];
-      liveEnd = null;
-      greenRegion = null;
-      lastResult = null;
-      dragging = null;
+      measurePoints = []; liveEnd = null; greenRegion = null; lastResult = null; dragging = null;
       updateHint('已重置。請重新擷取影像，用「兩點距離」選取已知尺寸物件後完成校正。');
       drawOverlay();
     });
 
-    document.getElementById('scale-mode').addEventListener('change', (e) => {
-      scaleMode = e.target.value;
-      drawOverlay();
-    });
+    document.getElementById('scale-mode').addEventListener('change', (e) => { scaleMode = e.target.value; drawOverlay(); });
 
-    // 相機進階控制事件
-    document.getElementById('zoom-slider').addEventListener('input', (e) => {
-      applyZoom(e.target.value);
-    });
+    document.getElementById('zoom-slider').addEventListener('input', (e) => { applyZoom(e.target.value); });
     document.getElementById('btn-torch').addEventListener('click', toggleTorch);
 
-    // 工具選擇
     document.querySelectorAll('#toolbar [data-tool]').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentTool = btn.dataset.tool;
-        measurePoints = [];
-        liveEnd = null;
-        greenRegion = null;
-        lastResult = null;
-        dragging = null;
+        measurePoints = []; liveEnd = null; greenRegion = null; lastResult = null; dragging = null;
         drawOverlay();
         updateHint(`已選擇「${btn.textContent}」。點選起點後會即時顯示綠色邊緣範圍，移動確認涵蓋正確後再點選終點，系統會自動對邊計算。`);
       });
@@ -1174,7 +1193,6 @@
       document.getElementById('calib-hint').textContent = msg;
     }
 
-    // 啟動
     startCamera();
     setTimeout(resizeOverlay, 300);
     setTimeout(resizeOverlay, 1000);
