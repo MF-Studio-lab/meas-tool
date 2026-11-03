@@ -177,6 +177,14 @@
       <button id="btn-finish-calib">完成校正</button>
       <button id="btn-recapture" class="secondary">重新開啟鏡頭</button>
     </div>
+    <!-- 相機進階控制（僅在瀏覽器支援時顯示） -->
+    <div class="calib-row" id="camera-controls" style="display:none;">
+      <label id="zoom-label" style="display:none;">變焦</label>
+      <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:120px;" />
+      <span id="zoom-value" style="display:none; font-size:12px; color:#94a3b8;">1.0x</span>
+      <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
+      <span id="cam-capability-hint" style="font-size:11px; color:#64748b;"></span>
+    </div>
     <div class="hint" id="calib-hint">請先開啟鏡頭，輸入實際尺寸後拖曳半透明尺規與物件重合，再按「完成校正」。</div>
   </div>
 
@@ -215,12 +223,14 @@
     const octx = overlay.getContext('2d');
 
     let stream = null;
+    let videoTrack = null;          // 目前的 video track，用來套用 zoom / torch
     let isCaptured = false;
     let pixelsPerUnit = 0;          // 校正後：每單位實際長度對應的像素數
     let currentUnit = 'mm';
     let scaleVisible = false;
     let scaleMode = 'line';         // 'line' | 'circle'
     let currentTool = null;         // 'line' | 'rect' | 'circle' | null
+    let torchOn = false;
 
     // 尺規狀態
     let lineScale = { x1: 80, y1: 120, x2: 280, y2: 120 }; // 水平尺規預設
@@ -238,10 +248,11 @@
       const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
       
       if (!isSecure) {
-        const msg = '目前不是安全環境（非 HTTPS / localhost）。\n\n手機瀏覽器開啟本地 HTML 檔案時，通常無法使用相機。\n\n解決方法：\n1. 把此檔案放到支援 HTTPS 的網頁空間（例如 GitHub Pages、Netlify、Vercel）\n2. 或使用電腦以 localhost 開啟後，再用手機連同一網路存取\n3. 最簡單：用電腦 Chrome 開啟此檔案進行測試';
+        const currentUrl = location.href;
+        const msg = `目前不是安全環境，無法使用相機。\n\n目前網址：${currentUrl}\n\n原因：手機瀏覽器只允許在 HTTPS 或 localhost 下開啟相機。\n透過 http://樹莓派IP 存取屬於非安全連線，瀏覽器會直接封鎖 getUserMedia。\n\n【推薦解決方法（由快到穩）】\n1. 使用 cloudflared 或 ngrok 建立暫時 HTTPS 隧道（最快，約1分鐘）\n2. 在樹莓派設定自簽 HTTPS 憑證\n3. 把檔案放到 GitHub Pages / Netlify 等免費 HTTPS 空間\n\n詳細步驟請看後續說明。`;
         alert(msg);
-        updateHint('請使用 HTTPS 或 localhost 環境開啟，否則無法存取相機。');
-        document.getElementById('result-text').textContent = '相機無法使用：需要 HTTPS 或 localhost 環境。';
+        updateHint('請改用 HTTPS 連線。目前為 http://IP 非安全環境，相機被瀏覽器封鎖。');
+        document.getElementById('result-text').textContent = '相機無法使用：需要 HTTPS 環境（目前為 http://IP）。';
         return;
       }
 
@@ -278,6 +289,12 @@
         canvas.style.display = 'none';
         isCaptured = false;
         pixelsPerUnit = 0;
+        torchOn = false;
+
+        // 取得 video track 並偵測可用能力
+        videoTrack = stream.getVideoTracks()[0] || null;
+        setupCameraControls(videoTrack);
+
         updateHint('鏡頭已開啟。請輸入實際尺寸，顯示並拖曳半透明尺規與物件重合後按「完成校正」。');
         document.getElementById('result-text').textContent = '請先完成校正並擷取影像。';
         resizeOverlay();
@@ -295,6 +312,103 @@
         alert(msg);
         updateHint('相機開啟失敗，請檢查權限與環境。');
         document.getElementById('result-text').textContent = '相機開啟失敗。';
+      }
+    }
+
+    // ==================== 相機進階控制（變焦 / 補光） ====================
+    function setupCameraControls(track) {
+      const controls = document.getElementById('camera-controls');
+      const zoomLabel = document.getElementById('zoom-label');
+      const zoomSlider = document.getElementById('zoom-slider');
+      const zoomValue = document.getElementById('zoom-value');
+      const btnTorch = document.getElementById('btn-torch');
+      const hint = document.getElementById('cam-capability-hint');
+
+      // 先全部隱藏
+      controls.style.display = 'none';
+      zoomLabel.style.display = 'none';
+      zoomSlider.style.display = 'none';
+      zoomValue.style.display = 'none';
+      btnTorch.style.display = 'none';
+      hint.textContent = '';
+
+      if (!track || typeof track.getCapabilities !== 'function') {
+        hint.textContent = '此瀏覽器／裝置不支援進階相機控制（常見於 iOS Safari）';
+        controls.style.display = 'flex';
+        return;
+      }
+
+      const caps = track.getCapabilities();
+      let hasAny = false;
+      let messages = [];
+
+      // 變焦（Zoom）
+      if (caps.zoom) {
+        const min = caps.zoom.min || 1;
+        const max = caps.zoom.max || 1;
+        const step = caps.zoom.step || 0.1;
+        if (max > min) {
+          zoomSlider.min = min;
+          zoomSlider.max = max;
+          zoomSlider.step = step;
+          zoomSlider.value = track.getSettings().zoom || min;
+          zoomValue.textContent = Number(zoomSlider.value).toFixed(1) + 'x';
+          zoomLabel.style.display = 'inline';
+          zoomSlider.style.display = 'inline-block';
+          zoomValue.style.display = 'inline';
+          hasAny = true;
+        }
+      } else {
+        messages.push('無變焦');
+      }
+
+      // 補光燈 / Torch（持續照明，非閃光）
+      if (caps.torch) {
+        btnTorch.style.display = 'inline-block';
+        btnTorch.textContent = '開啟補光';
+        hasAny = true;
+      } else {
+        messages.push('無補光燈');
+      }
+
+      // 其他常見但多數不支援的項目
+      if (!caps.focusMode && !caps.focusDistance) messages.push('無手動對焦');
+      if (!caps.iso) messages.push('無 ISO');
+      if (!caps.exposureCompensation && !caps.exposureMode) messages.push('無曝光控制');
+
+      if (hasAny) {
+        controls.style.display = 'flex';
+        hint.textContent = messages.length ? ('不支援：' + messages.join('、')) : '變焦 / 補光可用';
+      } else {
+        controls.style.display = 'flex';
+        hint.textContent = '此裝置不支援變焦、補光、ISO、手動對焦等進階控制（瀏覽器限制）';
+      }
+    }
+
+    // 套用變焦
+    async function applyZoom(value) {
+      if (!videoTrack) return;
+      try {
+        await videoTrack.applyConstraints({ advanced: [{ zoom: Number(value) }] });
+        document.getElementById('zoom-value').textContent = Number(value).toFixed(1) + 'x';
+      } catch (e) {
+        console.warn('變焦失敗', e);
+      }
+    }
+
+    // 開關補光燈
+    async function toggleTorch() {
+      if (!videoTrack) return;
+      try {
+        torchOn = !torchOn;
+        await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+        const btn = document.getElementById('btn-torch');
+        btn.textContent = torchOn ? '關閉補光' : '開啟補光';
+        btn.style.background = torchOn ? '#ca8a04' : '';
+      } catch (e) {
+        console.warn('補光燈切換失敗', e);
+        alert('此裝置無法控制補光燈');
+        torchOn = false;
       }
     }
 
@@ -935,6 +1049,12 @@
       scaleMode = e.target.value;
       drawOverlay();
     });
+
+    // 相機進階控制事件
+    document.getElementById('zoom-slider').addEventListener('input', (e) => {
+      applyZoom(e.target.value);
+    });
+    document.getElementById('btn-torch').addEventListener('click', toggleTorch);
 
     // 工具選擇
     document.querySelectorAll('#toolbar [data-tool]').forEach(btn => {
