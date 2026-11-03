@@ -121,6 +121,8 @@
       flex-shrink: 0;
       font-size: 14px;
       min-height: 52px;
+      max-height: 35vh;          /* 限制最大高度，避免擠壓影像區 */
+      overflow-y: auto;          * 內容過多時內部滾動 */
     }
     #result-panel .title { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
     #result-text { line-height: 1.45; }
