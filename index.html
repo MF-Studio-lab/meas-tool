@@ -274,6 +274,8 @@
     let scaleMode = 'line';         // 'line' | 'circle'
     let currentTool = null;         // 'line' | 'rect' | 'circle' | null
     let torchOn = false;
+    let savedZoom = 1;              // 重新擷取時保留的變焦倍率
+    let savedTorch = false;         // 重新擷取時是否重開補光
 
     // 尺規狀態
     let lineScale = { x1: 80, y1: 120, x2: 280, y2: 120 }; // 水平尺規預設
@@ -358,8 +360,18 @@
         videoTrack = stream.getVideoTracks()[0] || null;
         setupCameraControls(videoTrack);
 
+        // 保留校正時：還原先前變焦／補光（避免重回 1.0x）
+        if (preserveCalibration) {
+          await restoreCameraOptics();
+        } else {
+          savedZoom = 1;
+          savedTorch = false;
+          torchOn = false;
+        }
+
         if (preserveCalibration && pixelsPerUnit > 0) {
-          updateHint(`鏡頭已開啟（校正比例 ${pixelsPerUnit.toFixed(2)} px/${currentUnit} 已保留）。對準新試件後按「擷取影像」即可量測。`);
+          const zHint = savedZoom > 1 ? `，變焦 ${Number(savedZoom).toFixed(1)}x 已還原` : '';
+          updateHint(`鏡頭已開啟（校正比例 ${pixelsPerUnit.toFixed(2)} px/${currentUnit} 已保留${zHint}）。對準新試件後按「擷取影像」即可量測。`);
           document.getElementById('result-text').textContent =
             `校正仍有效（${pixelsPerUnit.toFixed(2)} px / ${currentUnit}）。請擷取新試件影像後直接量測。`;
         } else {
@@ -458,10 +470,50 @@
     async function applyZoom(value) {
       if (!videoTrack) return;
       try {
-        await videoTrack.applyConstraints({ advanced: [{ zoom: Number(value) }] });
-        document.getElementById('zoom-value').textContent = Number(value).toFixed(1) + 'x';
+        const z = Number(value);
+        await videoTrack.applyConstraints({ advanced: [{ zoom: z }] });
+        savedZoom = z;
+        document.getElementById('zoom-value').textContent = z.toFixed(1) + 'x';
+        const slider = document.getElementById('zoom-slider');
+        if (slider) slider.value = z;
       } catch (e) {
         console.warn('變焦失敗', e);
+      }
+    }
+
+    // 重新開啟鏡頭後還原變焦（與可選補光）
+    async function restoreCameraOptics() {
+      if (!videoTrack) return;
+      try {
+        const caps = typeof videoTrack.getCapabilities === 'function' ? videoTrack.getCapabilities() : {};
+        const advanced = [];
+        if (caps.zoom && savedZoom > 1) {
+          const min = caps.zoom.min || 1;
+          const max = caps.zoom.max || savedZoom;
+          const z = Math.max(min, Math.min(max, savedZoom));
+          advanced.push({ zoom: z });
+          savedZoom = z;
+        }
+        if (caps.torch && savedTorch) {
+          advanced.push({ torch: true });
+          torchOn = true;
+        }
+        if (advanced.length) {
+          await videoTrack.applyConstraints({ advanced });
+        }
+        // 同步 UI
+        const slider = document.getElementById('zoom-slider');
+        const zoomValue = document.getElementById('zoom-value');
+        if (slider && caps.zoom) {
+          slider.value = savedZoom;
+          if (zoomValue) zoomValue.textContent = Number(savedZoom).toFixed(1) + 'x';
+        }
+        const btnTorch = document.getElementById('btn-torch');
+        if (btnTorch && caps.torch) {
+          btnTorch.textContent = torchOn ? '關閉補光' : '開啟補光';
+        }
+      } catch (e) {
+        console.warn('還原變焦/補光失敗', e);
       }
     }
 
@@ -470,6 +522,7 @@
       if (!videoTrack) return;
       try {
         torchOn = !torchOn;
+        savedTorch = torchOn;
         await videoTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
         const btn = document.getElementById('btn-torch');
         btn.textContent = torchOn ? '關閉補光' : '開啟補光';
@@ -774,6 +827,15 @@
         ctx.drawImage(video, offsetX, offsetY, drawW, drawH);
       }
 
+      // 關閉前記住變焦／補光，供「重新擷取」還原
+      if (videoTrack && typeof videoTrack.getSettings === 'function') {
+        try {
+          const s = videoTrack.getSettings();
+          if (s.zoom != null) savedZoom = s.zoom;
+        } catch (_) {}
+      }
+      savedTorch = torchOn;
+
       // 關閉相機串流，釋放硬體（不再背景持續開啟）
       if (stream) {
         stream.getTracks().forEach(t => t.stop());
@@ -1011,57 +1073,145 @@
 
     /**
      * 在綠色選取範圍內自動找圓心（不依賴手指起點）
-     * 作法：
-     *  1) 在粗選環帶收集強邊緣點
-     *  2) 代數擬合得到候選圓心
-     *  3) 在粗選中心附近網格搜尋，以「各向半徑一致 + 邊緣強」打分，取最佳
+     * 作法（避免單邊反光把圓心拉歪）：
+     *  1) 圓盤 ROI 內亮度／暗度重心（適合亮孔或暗圓）
+     *  2) 等角射線各取一個邊緣點再擬合（每方向一票，避免一側點過多）
+     *  3) 以半徑一致性評分做小範圍微調
      */
     function findAutoCenter(imgData, roughCx, roughCy, roughR, expand) {
-      const rMin = Math.max(4, roughR - expand);
-      const rMax = roughR + expand;
-      const edgePts = [];
-      // 環帶內掃描強邊緣（步長 1px，夠快）
+      const rMax = Math.max(roughR + expand, 8);
       const x0 = Math.max(1, Math.floor(roughCx - rMax));
       const x1 = Math.min(imgData.width - 2, Math.ceil(roughCx + rMax));
       const y0 = Math.max(1, Math.floor(roughCy - rMax));
       const y1 = Math.min(imgData.height - 2, Math.ceil(roughCy + rMax));
-      const minG = getEdgeThreshold() * 0.9;
+
+      // ---- 1) 亮度／暗度重心（圓孔亮點或暗圓盤都很有效）----
+      let sumBrightX = 0, sumBrightY = 0, sumBrightW = 0;
+      let sumDarkX = 0, sumDarkY = 0, sumDarkW = 0;
+      let graySum = 0, grayCnt = 0;
+      const samples = [];
+      for (let y = y0; y <= y1; y += 1) {
+        for (let x = x0; x <= x1; x += 1) {
+          const dist = Math.hypot(x - roughCx, y - roughCy);
+          if (dist > rMax) continue;
+          const g = sampleGray(imgData, x, y);
+          samples.push(g);
+          graySum += g;
+          grayCnt++;
+        }
+      }
+      if (grayCnt < 20) return { cx: roughCx, cy: roughCy, r: roughR };
+
+      samples.sort((a, b) => a - b);
+      const gLow = samples[Math.floor(samples.length * 0.2)];
+      const gHigh = samples[Math.floor(samples.length * 0.8)];
+      const gMid = (gLow + gHigh) * 0.5;
+      const contrast = gHigh - gLow;
 
       for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
           const dist = Math.hypot(x - roughCx, y - roughCy);
-          if (dist < rMin || dist > rMax) continue;
-          const g = gradientAt(imgData, x, y);
-          if (g < minG) continue;
-          // 局部極大（3x3）才保留，減少雜點
-          let isMax = true;
-          for (let dy = -1; dy <= 1 && isMax; dy++) {
-            for (let dx = -1; dx <= 1; dx++) {
-              if (dx === 0 && dy === 0) continue;
-              if (gradientAt(imgData, x + dx, y + dy) > g) { isMax = false; break; }
-            }
+          if (dist > rMax) continue;
+          const g = sampleGray(imgData, x, y);
+          // 亮區權重（亮孔）
+          const wb = Math.max(0, g - gMid);
+          if (wb > 0) {
+            const w = wb * wb;
+            sumBrightX += x * w;
+            sumBrightY += y * w;
+            sumBrightW += w;
           }
-          if (isMax) edgePts.push({ x, y, g });
+          // 暗區權重（暗圓）
+          const wd = Math.max(0, gMid - g);
+          if (wd > 0) {
+            const w = wd * wd;
+            sumDarkX += x * w;
+            sumDarkY += y * w;
+            sumDarkW += w;
+          }
         }
       }
 
-      // 只留梯度較強的前 60% 點，避免弱反光干擾擬合
-      edgePts.sort((a, b) => b.g - a.g);
-      const keep = edgePts.slice(0, Math.max(24, Math.floor(edgePts.length * 0.6)));
-
       let bestCx = roughCx, bestCy = roughCy, bestR = roughR;
-      const fitted = fitCircleAlgebraic(keep);
-      if (fitted && Math.hypot(fitted.cx - roughCx, fitted.cy - roughCy) < Math.max(roughR * 0.35, 20)) {
-        bestCx = fitted.cx;
-        bestCy = fitted.cy;
-        bestR = fitted.r;
+      // 對比足夠時採用重心：亮孔用亮重心，暗圓用暗重心
+      if (contrast > 12) {
+        // 判斷 ROI 中心附近偏亮還偏暗
+        const centerGray = sampleGray(imgData, roughCx, roughCy);
+        if (centerGray >= gMid && sumBrightW > 1e-3) {
+          bestCx = sumBrightX / sumBrightW;
+          bestCy = sumBrightY / sumBrightW;
+        } else if (centerGray < gMid && sumDarkW > 1e-3) {
+          bestCx = sumDarkX / sumDarkW;
+          bestCy = sumDarkY / sumDarkW;
+        } else if (sumBrightW > sumDarkW && sumBrightW > 1e-3) {
+          bestCx = sumBrightX / sumBrightW;
+          bestCy = sumBrightY / sumBrightW;
+        } else if (sumDarkW > 1e-3) {
+          bestCx = sumDarkX / sumDarkW;
+          bestCy = sumDarkY / sumDarkW;
+        }
+        // 重心不可偏離粗選太遠
+        if (Math.hypot(bestCx - roughCx, bestCy - roughCy) > Math.max(roughR * 0.45, 16)) {
+          bestCx = roughCx;
+          bestCy = roughCy;
+        }
       }
 
-      // 網格微搜：在擬合中心附近找「各向半徑變異最小、邊緣最穩」的點
-      const searchRad = Math.min(14, Math.max(6, roughR * 0.12));
-      const gridStep = searchRad > 10 ? 2 : 1;
+      // ---- 2) 等角射線：每方向只取一個最強邊緣點，再擬合 ----
+      const nRay = 48;
+      const rayEdgePts = [];
+      const rSearch0 = Math.max(3, roughR * 0.35);
+      const rSearch1 = roughR + expand;
+      for (let i = 0; i < nRay; i++) {
+        const ang = (i / nRay) * Math.PI * 2;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        let bestLocalR = roughR, bestLocalG = -1;
+        for (let rad = rSearch0; rad <= rSearch1; rad += 0.5) {
+          const g1 = sampleGray(imgData, bestCx + cos * (rad - 0.5), bestCy + sin * (rad - 0.5));
+          const g2 = sampleGray(imgData, bestCx + cos * (rad + 0.5), bestCy + sin * (rad + 0.5));
+          const deriv = Math.abs(g2 - g1) * edgeGain;
+          if (deriv > bestLocalG) {
+            bestLocalG = deriv;
+            bestLocalR = rad;
+          }
+        }
+        if (bestLocalG > getEdgeThreshold() * 0.05) {
+          rayEdgePts.push({
+            x: bestCx + cos * bestLocalR,
+            y: bestCy + sin * bestLocalR,
+            g: bestLocalG
+          });
+        }
+      }
+
+      if (rayEdgePts.length >= 16) {
+        const fitted = fitCircleAlgebraic(rayEdgePts);
+        if (fitted && Math.hypot(fitted.cx - roughCx, fitted.cy - roughCy) < Math.max(roughR * 0.4, 18)) {
+          // 與重心融合：若兩者接近，取平均更穩；差異大則以射線擬合為主（外形圓）
+          const d = Math.hypot(fitted.cx - bestCx, fitted.cy - bestCy);
+          if (d < Math.max(3, roughR * 0.08)) {
+            bestCx = (bestCx + fitted.cx) * 0.5;
+            bestCy = (bestCy + fitted.cy) * 0.5;
+          } else {
+            // 亮孔重心通常更準；若中心區明顯偏亮，保留更多重心權重
+            const cg = sampleGray(imgData, bestCx, bestCy);
+            if (cg >= gMid && contrast > 20) {
+              bestCx = bestCx * 0.65 + fitted.cx * 0.35;
+              bestCy = bestCy * 0.65 + fitted.cy * 0.35;
+            } else {
+              bestCx = fitted.cx;
+              bestCy = fitted.cy;
+            }
+          }
+          bestR = fitted.r;
+        }
+      }
+
+      // ---- 3) 小範圍網格微調：最小化各向半徑標準差 ----
+      const searchRad = Math.min(10, Math.max(4, roughR * 0.1));
+      const gridStep = 1;
       let bestScore = -1;
-      const scoreAngles = 24;
+      const scoreAngles = 32;
 
       function scoreCenter(tcx, tcy) {
         const rs = [];
@@ -1070,9 +1220,9 @@
           const ang = (i / scoreAngles) * Math.PI * 2;
           const cos = Math.cos(ang), sin = Math.sin(ang);
           let bestLocalR = bestR, bestLocalG = -1;
-          for (let d = -expand; d <= expand; d += 1) {
+          for (let d = -expand; d <= expand; d += 0.5) {
             const rad = bestR + d;
-            if (rad < 3) continue;
+            if (rad < 2) continue;
             const g1 = sampleGray(imgData, tcx + cos * (rad - 0.5), tcy + sin * (rad - 0.5));
             const g2 = sampleGray(imgData, tcx + cos * (rad + 0.5), tcy + sin * (rad + 0.5));
             const deriv = Math.abs(g2 - g1) * edgeGain;
@@ -1084,28 +1234,25 @@
           rs.push(bestLocalR);
           sumG += bestLocalG;
         }
-        // 標準差越小越好（圓心越準），平均梯度越大越好
         const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
         let varSum = 0;
         for (const v of rs) varSum += (v - mean) * (v - mean);
         const std = Math.sqrt(varSum / rs.length);
-        return { score: (sumG / rs.length) / (1 + std * 1.8), meanR: mean, std };
+        // 標準差權重加大，強迫圓心對準
+        return { score: (sumG / rs.length) / (1 + std * 3.5), meanR: mean, std };
       }
 
-      // 先評分目前最佳
       {
         const s = scoreCenter(bestCx, bestCy);
         bestScore = s.score;
         bestR = s.meanR;
       }
-
       for (let dy = -searchRad; dy <= searchRad; dy += gridStep) {
         for (let dx = -searchRad; dx <= searchRad; dx += gridStep) {
           if (dx === 0 && dy === 0) continue;
           const tcx = bestCx + dx;
           const tcy = bestCy + dy;
-          // 必須仍大致落在綠色粗選範圍內
-          if (Math.hypot(tcx - roughCx, tcy - roughCy) > Math.max(roughR * 0.4, 24)) continue;
+          if (Math.hypot(tcx - roughCx, tcy - roughCy) > Math.max(roughR * 0.45, 20)) continue;
           const s = scoreCenter(tcx, tcy);
           if (s.score > bestScore) {
             bestScore = s.score;
@@ -1419,9 +1566,16 @@
       else if (tool === 'circle') {
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const expand = 16;
-        greenRegion = { type: 'circle', cx: p0.x, cy: p0.y, r: r, expand: expand };
         const edges = autoEdgeCircle(p0.x, p0.y, r, expand);
         lastResult = { tool: 'circle', ...edges };
+        // 綠色範圍改對齊自動圓心與外徑，方便直觀核對是否貼合實體圓
+        greenRegion = {
+          type: 'circle',
+          cx: edges.cx,
+          cy: edges.cy,
+          r: edges.outerR || r,
+          expand: 6
+        };
 
         if (pixelsPerUnit > 0) {
           const radii = edges.radii || [edges.outerR];
