@@ -74,6 +74,15 @@
       display: flex;
       position: relative;
       overflow: hidden;
+      min-height: 0;
+    }
+    #viewport-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
     }
     /* 左側 / 上方影像區 */
     #image-area {
@@ -84,6 +93,7 @@
       align-items: center;
       justify-content: center;
       overflow: hidden;
+      min-height: 0;
     }
     #video, #canvas {
       max-width: 100%;
@@ -117,22 +127,52 @@
       outline: 2px solid #2dd4bf;
       background: #0f766e;
     }
-    /* 下方結果區：固定高度上限，多行結果在內部捲動，不擠壓影像區 */
+    /* 下方結果區：固定高度，內容再多也只在內部捲動，绝不改變影像區尺寸 */
     #result-panel {
       background: var(--panel);
       border-top: 1px solid #334155;
-      padding: 8px 14px;
-      flex: 0 0 auto;
-      flex-shrink: 0;
-      font-size: 14px;
-      min-height: 52px;
-      max-height: 132px;
+      padding: 6px 12px;
+      flex: 0 0 128px;
+      height: 128px;
+      min-height: 128px;
+      max-height: 128px;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
+      font-size: 14px;
     }
-    #result-panel .title { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
-    #result-text { line-height: 1.45; }
+    #result-panel .title { color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+    #result-text { line-height: 1.4; }
     #edge-gain-row { display: none; }
+    /* 影像舞台（數位縮放／平移） */
+    #image-stage {
+      position: relative;
+      transform-origin: center center;
+      will-change: transform;
+    }
+    #view-zoom-bar {
+      display: none;
+      position: absolute;
+      right: 8px;
+      bottom: 8px;
+      z-index: 15;
+      gap: 4px;
+      align-items: center;
+      background: rgba(15, 23, 42, 0.75);
+      padding: 4px 6px;
+      border-radius: 8px;
+    }
+    #view-zoom-bar button { padding: 6px 10px; font-size: 12px; }
+    /* 相機控制列：放在影像下方，隱藏時不影響影像區位置 */
+    #camera-controls-bar {
+      display: none;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      background: var(--panel);
+      border-top: 1px solid #334155;
+      padding: 6px 10px;
+      flex: 0 0 auto;
+    }
 
     /* ========== 手機版布局 (≤768px) ========== */
     @media (max-width: 768px) {
@@ -141,6 +181,10 @@
         flex: 1 1 0;
         min-height: 0;
         flex-direction: column;
+      }
+      #viewport-col {
+        flex: 1 1 0;
+        min-height: 0;
       }
       #image-area {
         flex: 1 1 0;
@@ -169,14 +213,16 @@
         padding: 10px 14px;
         font-size: 13px;
       }
-      /* 手機結果區：固定上限高度，多層圓徑在此捲動，不擠影像 */
+      /* 手機結果區：固定高度，不因文字多寡改變 */
       #result-panel {
         font-size: 13px;
-        max-height: 110px;
-        min-height: 48px;
-        flex: 0 0 auto;
+        flex: 0 0 120px;
+        height: 120px;
+        min-height: 120px;
+        max-height: 120px;
       }
       input[type="number"] { width: 70px; }
+      #camera-controls-bar { font-size: 12px; }
     }
   </style>
 </head>
@@ -201,23 +247,6 @@
       <button id="btn-finish-calib">完成校正</button>
       <button id="btn-recapture" class="secondary">重新開啟鏡頭</button>
     </div>
-    <!-- 相機進階控制（擷取後改為 invisible 佔位，避免影像區上跳導致對位偏移） -->
-    <div class="calib-row" id="camera-controls" style="display:none; flex-wrap:wrap; gap:8px;">
-      <label id="zoom-label" style="display:none;">變焦</label>
-      <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:100px;" />
-      <span id="zoom-value" style="display:none; font-size:12px; color:#94a3b8;">1.0x</span>
-      <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
-      <label id="focus-label" style="display:none;">對焦</label>
-      <select id="focus-mode" style="display:none; background:#0f172a; border:1px solid #475569; color:#f1f5f9; padding:4px 6px; border-radius:6px; font-size:12px;"></select>
-      <input type="range" id="focus-slider" min="0" max="1" step="0.01" value="0.5" style="display:none; width:90px;" />
-      <label id="iso-label" style="display:none;">ISO</label>
-      <input type="range" id="iso-slider" min="100" max="800" step="10" value="100" style="display:none; width:90px;" />
-      <span id="iso-value" style="display:none; font-size:12px; color:#94a3b8;">—</span>
-      <label id="ev-label" style="display:none;">曝光</label>
-      <input type="range" id="ev-slider" min="-2" max="2" step="0.1" value="0" style="display:none; width:90px;" />
-      <span id="ev-value" style="display:none; font-size:12px; color:#94a3b8;">0</span>
-      <span id="cam-capability-hint" style="font-size:11px; color:#64748b; width:100%;"></span>
-    </div>
     <div class="calib-row" id="level-row" style="display:none; align-items:center; gap:10px;">
       <label>水平儀</label>
       <div id="level-indicator" style="display:flex; align-items:center; gap:8px; font-size:13px;">
@@ -233,11 +262,39 @@
 
   <!-- 主區域 -->
   <div id="main">
-    <div id="image-area">
-      <video id="video" autoplay playsinline muted></video>
-      <canvas id="canvas"></canvas>
-      <!-- 用於繪製尺規、綠色區塊、量測結果的覆蓋層 -->
-      <canvas id="overlay-canvas"></canvas>
+    <div id="viewport-col">
+      <div id="image-area">
+        <div id="image-stage">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="canvas"></canvas>
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+        <!-- 擷取／載入後的數位縮放 -->
+        <div id="view-zoom-bar">
+          <button type="button" id="btn-view-zoom-out" class="secondary" title="縮小">−</button>
+          <span id="view-zoom-label" style="font-size:12px; color:#94a3b8; min-width:36px; text-align:center;">1.0x</span>
+          <button type="button" id="btn-view-zoom-in" class="secondary" title="放大">＋</button>
+          <button type="button" id="btn-view-zoom-reset" class="secondary" title="重設">重設</button>
+        </div>
+      </div>
+
+      <!-- 相機控制列：影像下方，關閉／隱藏不影響影像區位置 -->
+      <div id="camera-controls-bar">
+        <label id="zoom-label" style="display:none;">變焦</label>
+        <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:100px;" />
+        <span id="zoom-value" style="display:none; font-size:12px; color:#94a3b8;">1.0x</span>
+        <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
+        <label id="focus-label" style="display:none;">對焦</label>
+        <select id="focus-mode" style="display:none; background:#0f172a; border:1px solid #475569; color:#f1f5f9; padding:4px 6px; border-radius:6px; font-size:12px;"></select>
+        <input type="range" id="focus-slider" min="0" max="1" step="0.01" value="0.5" style="display:none; width:90px;" />
+        <label id="iso-label" style="display:none;">ISO</label>
+        <input type="range" id="iso-slider" min="100" max="800" step="10" value="100" style="display:none; width:90px;" />
+        <span id="iso-value" style="display:none; font-size:12px; color:#94a3b8;">—</span>
+        <label id="ev-label" style="display:none;">曝光</label>
+        <input type="range" id="ev-slider" min="-2" max="2" step="0.1" value="0" style="display:none; width:90px;" />
+        <span id="ev-value" style="display:none; font-size:12px; color:#94a3b8;">0</span>
+        <span id="cam-capability-hint" style="font-size:11px; color:#64748b;"></span>
+      </div>
     </div>
 
     <!-- 工具列 -->
@@ -248,6 +305,8 @@
       <button id="btn-clear" class="secondary">清除量測</button>
       <button id="btn-recapture-measure" class="secondary">重新擷取</button>
       <button id="btn-recalib" class="secondary">重新校正</button>
+      <button id="btn-load-image" class="secondary">載入影像</button>
+      <input type="file" id="file-image-input" accept="image/*" style="display:none;" />
       <button id="btn-capture">擷取影像</button>
     </div>
   </div>
@@ -297,6 +356,11 @@
     let torchOn = false;
     let savedZoom = 1;              // 重新擷取時保留的變焦倍率
     let savedTorch = false;         // 重新擷取時是否重開補光
+    // 擷取／載入後的數位檢視縮放（與相機光學變焦無關）
+    let viewZoom = 1;
+    let viewPanX = 0;
+    let viewPanY = 0;
+    let viewPanning = null; // { x0, y0, panX0, panY0 }
 
     // 尺規狀態
     let lineScale = { x1: 80, y1: 120, x2: 280, y2: 120 }; // 水平尺規預設
@@ -361,6 +425,8 @@
         video.style.display = 'block';
         canvas.style.display = 'none';
         isCaptured = false;
+        showViewZoomBar(false);
+        resetViewTransform();
         if (!preserveCalibration) {
           pixelsPerUnit = 0;
         }
@@ -419,7 +485,7 @@
 
     // ==================== 相機進階控制（變焦 / 補光 / 對焦 / ISO / 曝光） ====================
     function setupCameraControls(track) {
-      const controls = document.getElementById('camera-controls');
+      const controls = document.getElementById('camera-controls-bar');
       const zoomLabel = document.getElementById('zoom-label');
       const zoomSlider = document.getElementById('zoom-slider');
       const zoomValue = document.getElementById('zoom-value');
@@ -435,14 +501,11 @@
       const evValue = document.getElementById('ev-value');
       const hint = document.getElementById('cam-capability-hint');
 
-      // 先全部隱藏子控制，並恢復列的可見性（重新開鏡頭時）
+      // 先全部隱藏子控制
       [zoomLabel, zoomSlider, zoomValue, btnTorch, focusLabel, focusMode, focusSlider,
         isoLabel, isoSlider, isoValue, evLabel, evSlider, evValue].forEach(el => {
         if (el) el.style.display = 'none';
       });
-      controls.style.visibility = 'visible';
-      controls.style.pointerEvents = 'auto';
-      controls.style.minHeight = '';
       controls.style.display = 'none';
       hint.textContent = '';
 
@@ -688,6 +751,105 @@
       drawOverlay();
     }
     window.addEventListener('resize', resizeOverlay);
+
+    function showViewZoomBar(show) {
+      const bar = document.getElementById('view-zoom-bar');
+      if (bar) bar.style.display = show ? 'flex' : 'none';
+    }
+    function resetViewTransform() {
+      viewZoom = 1;
+      viewPanX = 0;
+      viewPanY = 0;
+      applyViewTransform();
+    }
+    function applyViewTransform() {
+      const stage = document.getElementById('image-stage');
+      if (!stage) return;
+      stage.style.transform = `translate(${viewPanX}px, ${viewPanY}px) scale(${viewZoom})`;
+      const label = document.getElementById('view-zoom-label');
+      if (label) label.textContent = viewZoom.toFixed(1) + 'x';
+    }
+    function setViewZoom(z, focusClientX, focusClientY) {
+      const prev = viewZoom;
+      viewZoom = Math.max(1, Math.min(8, z));
+      // 以焦點為中心縮放（可選）
+      if (focusClientX != null && focusClientY != null && prev > 0) {
+        const area = document.getElementById('image-area').getBoundingClientRect();
+        const cx = focusClientX - (area.left + area.width / 2);
+        const cy = focusClientY - (area.top + area.height / 2);
+        const ratio = viewZoom / prev;
+        viewPanX = cx - (cx - viewPanX) * ratio;
+        viewPanY = cy - (cy - viewPanY) * ratio;
+      }
+      if (viewZoom === 1) { viewPanX = 0; viewPanY = 0; }
+      applyViewTransform();
+    }
+
+    // ==================== 載入本機影像（無相機亦可量測） ====================
+    function loadImageFromFile(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        alert('請選擇圖片檔（JPG／PNG／WebP 等）');
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        // 關閉相機（若有）
+        if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+          stream = null;
+          videoTrack = null;
+          video.srcObject = null;
+        }
+        const camControls = document.getElementById('camera-controls-bar');
+        if (camControls) camControls.style.display = 'none';
+
+        video.style.display = 'none';
+        canvas.style.display = 'block';
+
+        // 以圖片原始解析度繪入 canvas（上限避免過大記憶體）
+        const maxSide = 2400;
+        let w = img.naturalWidth || img.width;
+        let h = img.naturalHeight || img.height;
+        if (Math.max(w, h) > maxSide) {
+          const s = maxSide / Math.max(w, h);
+          w = Math.round(w * s);
+          h = Math.round(h * s);
+        }
+        canvas.width = w;
+        canvas.height = h;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(img, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+
+        isCaptured = true;
+        measurePoints = [];
+        liveEnd = null;
+        greenRegion = null;
+        lastResult = null;
+        lastSelection = null;
+        dragging = null;
+        showEdgeGainControls(false);
+        showViewZoomBar(true);
+        resetViewTransform();
+
+        if (pixelsPerUnit <= 0) {
+          updateHint('已載入影像。用「兩點距離」或「圓形」選已知尺寸完成校正，或先完成校正後量測。');
+          document.getElementById('result-text').textContent = '影像已載入。請校正或選擇量測工具。';
+        } else {
+          updateHint('已載入影像（校正比例仍有效）。可直接量測，或使用右下角數位縮放檢視邊緣。');
+          document.getElementById('result-text').textContent = '影像已載入，可開始量測。';
+        }
+        void document.body.offsetHeight;
+        resizeOverlay();
+        requestAnimationFrame(() => { resizeOverlay(); drawOverlay(); });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        alert('無法讀取此影像檔');
+      };
+      img.src = url;
+    }
 
     // ==================== 繪製覆蓋層（尺規 + 綠色區塊 + 量測標記） ====================
     function drawOverlay() {
@@ -961,22 +1123,15 @@
         video.srcObject = null;
       }
 
-      // 保留相機控制列佔位高度，避免列消失後影像區上移、準心相對偏移
-      const camControls = document.getElementById('camera-controls');
-      if (camControls) {
-        const h = camControls.getBoundingClientRect().height;
-        if (h > 0) camControls.style.minHeight = Math.ceil(h) + 'px';
-        camControls.style.visibility = 'hidden';
-        camControls.style.pointerEvents = 'none';
-        // 仍用 flex 佔位，不要 display:none
-        if (camControls.style.display === 'none') {
-          camControls.style.display = 'flex';
-        }
-      }
+      // 相機控制列在影像下方：直接隱藏即可，不影響影像區位置
+      const camControls = document.getElementById('camera-controls-bar');
+      if (camControls) camControls.style.display = 'none';
 
       video.style.display = 'none';
       canvas.style.display = 'block';
       isCaptured = true;
+      showViewZoomBar(true);
+      resetViewTransform();
       measurePoints = [];
       liveEnd = null;
       greenRegion = null;
@@ -1948,6 +2103,15 @@
 
     // 尺規拖曳
     function onPointerDown(e) {
+      // 數位縮放後：Alt＋拖曳 或 雙指平移
+      if (isCaptured && viewZoom > 1.01 && (e.altKey || (e.touches && e.touches.length >= 2))) {
+        e.preventDefault();
+        const t = e.touches && e.touches.length ? e.touches[0] : e;
+        viewPanning = { x0: t.clientX, y0: t.clientY, panX0: viewPanX, panY0: viewPanY };
+        dragging = { type: 'view-pan' };
+        return;
+      }
+
       // 量測 / 校正選取模式（已擷取影像後）
       if (isCaptured && currentTool) {
         e.preventDefault();
@@ -2019,6 +2183,15 @@
     function onPointerMove(e) {
       if (!dragging) return;
       e.preventDefault();
+
+      if (dragging.type === 'view-pan' && viewPanning) {
+        const t = e.touches && e.touches.length ? e.touches[0] : e;
+        viewPanX = viewPanning.panX0 + (t.clientX - viewPanning.x0);
+        viewPanY = viewPanning.panY0 + (t.clientY - viewPanning.y0);
+        applyViewTransform();
+        return;
+      }
+
       const pos = getPos(e);
 
       // 手動拖曳圓心：僅平移，不重算外徑
@@ -2104,6 +2277,12 @@
         return;
       }
 
+      if (dragging && dragging.type === 'view-pan') {
+        dragging = null;
+        viewPanning = null;
+        return;
+      }
+
       // 圓心／外徑手動調整結束：不自動重算（需按「依圓心重算」）
       if (dragging && (dragging.type === 'circle-center-adjust' || dragging.type === 'circle-radius-adjust')) {
         dragging = null;
@@ -2165,8 +2344,29 @@
     document.getElementById('btn-capture').addEventListener('click', captureImage);
     // 下方工具列：重新擷取（換試件，保留校正）
     document.getElementById('btn-recapture-measure').addEventListener('click', () => {
+      showViewZoomBar(false);
+      resetViewTransform();
       startCamera(true);
     });
+    // 載入本機影像
+    document.getElementById('btn-load-image').addEventListener('click', () => {
+      document.getElementById('file-image-input').click();
+    });
+    document.getElementById('file-image-input').addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) loadImageFromFile(f);
+      e.target.value = '';
+    });
+    // 數位縮放
+    document.getElementById('btn-view-zoom-in').addEventListener('click', () => setViewZoom(viewZoom + 0.5));
+    document.getElementById('btn-view-zoom-out').addEventListener('click', () => setViewZoom(viewZoom - 0.5));
+    document.getElementById('btn-view-zoom-reset').addEventListener('click', () => resetViewTransform());
+    document.getElementById('image-area').addEventListener('wheel', (e) => {
+      if (!isCaptured) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.25 : 0.25;
+      setViewZoom(viewZoom + delta, e.clientX, e.clientY);
+    }, { passive: false });
     document.getElementById('btn-clear').addEventListener('click', () => {
       measurePoints = [];
       liveEnd = null;
