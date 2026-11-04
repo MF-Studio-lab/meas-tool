@@ -247,13 +247,20 @@
   <div id="result-panel">
     <div class="title">量測結果（自動邊緣計算，降低人為誤差）</div>
     <div id="result-text">請先完成校正並擷取影像，再使用工具進行量測。</div>
-    <!-- 邊緣增益放在結果區內，避免上方列變高擠壓影像 -->
+    <!-- 邊緣增益與圓心微調（結果區內，避免擠壓影像） -->
     <div id="edge-gain-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; padding-top:6px; border-top:1px solid #334155;">
       <label style="font-size:12px;" title="調低可過濾雜訊、讓準心卡在強邊緣；調高則更靈敏但易受雜訊影響">邊緣增益</label>
-      <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:120px; accent-color:#0d9488;" />
-      <span id="edge-gain-value" style="font-size:12px; min-width:32px; color:#2dd4bf;">1.0</span>
-      <span style="font-size:11px; color:#94a3b8;">← 雜訊　靈敏 →</span>
+      <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:100px; accent-color:#0d9488;" />
+      <span id="edge-gain-value" style="font-size:12px; min-width:28px; color:#2dd4bf;">1.0</span>
       <button id="btn-recalc-edge" class="secondary" style="padding:4px 8px; font-size:11px;">重算邊緣</button>
+      <span id="center-nudge-wrap" style="display:none; align-items:center; gap:4px; margin-left:4px;">
+        <span style="font-size:11px; color:#94a3b8;">圓心微調</span>
+        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="-1" style="padding:4px 8px; font-size:12px;" title="上移 1px">↑</button>
+        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="1" style="padding:4px 8px; font-size:12px;" title="下移 1px">↓</button>
+        <button type="button" class="secondary center-nudge" data-dx="-1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="左移 1px">←</button>
+        <button type="button" class="secondary center-nudge" data-dx="1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="右移 1px">→</button>
+        <span style="font-size:10px; color:#64748b;">或拖曳粉紅＋</span>
+      </span>
     </div>
   </div>
 
@@ -1487,7 +1494,136 @@
     function showEdgeGainControls(show) {
       const row = document.getElementById('edge-gain-row');
       if (row) row.style.display = show ? 'flex' : 'none';
-      // 結果區內部捲動即可，不改變影像區高度，避免綠色區域位移
+      const nudge = document.getElementById('center-nudge-wrap');
+      if (nudge) {
+        const isCircle = show && lastResult && lastResult.tool === 'circle';
+        nudge.style.display = isCircle ? 'inline-flex' : 'none';
+      }
+    }
+
+    // 從指定圓心重算各層半徑（手動微調圓心後使用，保持與實體對位）
+    function refineCircleFromCenter(cx, cy, approxR) {
+      const imgData = getImageDataSafe();
+      if (!imgData) return null;
+      const expand = 16;
+      const angles = 48;
+      const searchHalf = Math.min(expand, 12);
+      // 外徑：半高法
+      const rayRs = [];
+      for (let i = 0; i < angles; i++) {
+        const ang = (i / angles) * Math.PI * 2;
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        let peakR = approxR, bestD = -1;
+        for (let d = -searchHalf; d <= searchHalf; d += 0.5) {
+          const rad = approxR + d;
+          if (rad < 2) continue;
+          const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
+          const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
+          const deriv = Math.abs(g2 - g1);
+          if (deriv > bestD) { bestD = deriv; peakR = rad; }
+        }
+        if (bestD < 2) continue;
+        const gIn = sampleGray(imgData, cx + cos * Math.max(1.5, peakR - 3), cy + sin * Math.max(1.5, peakR - 3));
+        const gOut = sampleGray(imgData, cx + cos * (peakR + 3), cy + sin * (peakR + 3));
+        const mid = (gIn + gOut) * 0.5;
+        let edgeR = peakR;
+        if (Math.abs(gOut - gIn) >= 5) {
+          let prevG = sampleGray(imgData, cx + cos * (peakR - 2.5), cy + sin * (peakR - 2.5));
+          let prevR = peakR - 2.5;
+          for (let rad = peakR - 2.25; rad <= peakR + 2.5; rad += 0.25) {
+            const g = sampleGray(imgData, cx + cos * rad, cy + sin * rad);
+            if ((prevG - mid) * (g - mid) <= 0 && Math.abs(g - prevG) > 1e-3) {
+              const t = (mid - prevG) / (g - prevG);
+              edgeR = prevR + 0.25 * Math.max(0, Math.min(1, t));
+              break;
+            }
+            prevG = g;
+            prevR = rad;
+          }
+        }
+        rayRs.push(edgeR);
+      }
+      if (!rayRs.length) return { cx, cy, outerR: approxR, radii: [approxR], innerR: null };
+      rayRs.sort((a, b) => a - b);
+      const trim = Math.floor(rayRs.length * 0.1);
+      const clipped = rayRs.length >= 8 ? rayRs.slice(trim, rayRs.length - trim) : rayRs;
+      const outerR = clipped[Math.floor(clipped.length / 2)];
+
+      // 保留既有內徑層相對比例粗估：在新圓心下對原內徑再精修
+      const radii = [outerR];
+      const prevRadii = (lastResult && lastResult.radii) ? lastResult.radii.slice(1) : [];
+      for (const ir0 of prevRadii) {
+        if (ir0 >= outerR - 2) continue;
+        const irs = [];
+        for (let i = 0; i < 24; i++) {
+          const ang = (i / 24) * Math.PI * 2;
+          const cos = Math.cos(ang), sin = Math.sin(ang);
+          let peakR = ir0, bestD = -1;
+          for (let d = -3; d <= 3; d += 0.5) {
+            const rad = ir0 + d;
+            if (rad < 2 || rad > outerR - 2) continue;
+            const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
+            const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
+            const deriv = Math.abs(g2 - g1);
+            if (deriv > bestD) { bestD = deriv; peakR = rad; }
+          }
+          if (bestD > 2) irs.push(peakR);
+        }
+        if (irs.length >= 8) {
+          irs.sort((a, b) => a - b);
+          radii.push(irs[Math.floor(irs.length / 2)]);
+        }
+      }
+      radii.sort((a, b) => b - a);
+      return { cx, cy, outerR: radii[0], radii, innerR: radii.length > 1 ? radii[1] : null, autoCenter: true };
+    }
+
+    function applyCircleResult(edges) {
+      lastResult = { tool: 'circle', ...edges };
+      greenRegion = {
+        type: 'circle',
+        cx: edges.cx,
+        cy: edges.cy,
+        r: edges.outerR,
+        expand: 6
+      };
+      // 更新 lastSelection 的參考點，便於增益重算
+      if (lastSelection && lastSelection.tool === 'circle') {
+        lastSelection.p0 = { x: edges.cx, y: edges.cy };
+        lastSelection.p1 = { x: edges.cx + edges.outerR, y: edges.cy };
+      }
+      const outerPx = edges.outerR * 2;
+      if (pixelsPerUnit > 0) {
+        const radii = edges.radii || [edges.outerR];
+        let html = `圓形（自動邊緣，共偵測 ${radii.length} 層）`;
+        radii.forEach((rad, idx) => {
+          const d = (rad * 2) / pixelsPerUnit;
+          const pxD = rad * 2;
+          if (idx === 0) {
+            html += `<br><strong>外徑：${d.toFixed(3)} ${currentUnit}</strong> <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
+          } else {
+            html += `<br>內徑 ${idx}：${d.toFixed(3)} ${currentUnit} <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
+          }
+        });
+        document.getElementById('result-text').innerHTML = html;
+      } else {
+        lastPixelForCalib = outerPx;
+        document.getElementById('result-text').innerHTML =
+          `校正用圓形（自動邊緣）<br>` +
+          `偵測到外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
+          `可拖曳粉紅＋或用圓心微調對齊實體後，再輸入實際尺寸按「完成校正」。`;
+      }
+      showEdgeGainControls(true);
+      drawOverlay();
+    }
+
+    function nudgeCircleCenter(dx, dy) {
+      if (!lastResult || lastResult.tool !== 'circle') return;
+      const cx = lastResult.cx + dx;
+      const cy = lastResult.cy + dy;
+      const approxR = lastResult.outerR || 10;
+      const edges = refineCircleFromCenter(cx, cy, approxR);
+      if (edges) applyCircleResult(edges);
     }
 
     function performMeasure() {
@@ -1567,45 +1703,8 @@
         const r = Math.hypot(p1.x - p0.x, p1.y - p0.y);
         const expand = 16;
         const edges = autoEdgeCircle(p0.x, p0.y, r, expand);
-        lastResult = { tool: 'circle', ...edges };
-        // 綠色範圍改對齊自動圓心與外徑，方便直觀核對是否貼合實體圓
-        greenRegion = {
-          type: 'circle',
-          cx: edges.cx,
-          cy: edges.cy,
-          r: edges.outerR || r,
-          expand: 6
-        };
-
-        if (pixelsPerUnit > 0) {
-          const radii = edges.radii || [edges.outerR];
-          let html = `圓形（自動邊緣，共偵測 ${radii.length} 層）`;
-          radii.forEach((rad, idx) => {
-            const d = (rad * 2) / pixelsPerUnit;
-            const pxD = rad * 2;
-            if (idx === 0) {
-              html += `<br><strong>外徑：${d.toFixed(3)} ${currentUnit}</strong> <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
-            } else {
-              html += `<br>內徑 ${idx}：${d.toFixed(3)} ${currentUnit} <span style="color:#94a3b8;font-size:11px;">(${pxD.toFixed(1)} px)</span>`;
-              if (pxD < 10) {
-                html += ` <span style="color:#fbbf24;font-size:11px;">※像素過少，誤差較大</span>`;
-              }
-            }
-          });
-          if (radii.length >= 2) {
-            const thick = (radii[0] - radii[1]) / pixelsPerUnit;
-            html += `<br>最外層壁厚（約）：${thick.toFixed(3)} ${currentUnit}`;
-          }
-          document.getElementById('result-text').innerHTML = html;
-        } else {
-          // 圓形工具也可直接用於校正（以外徑像素當已知長度）
-          const outerPx = (edges.outerR || r) * 2;
-          lastPixelForCalib = outerPx;
-          document.getElementById('result-text').innerHTML =
-            `校正用圓形（自動邊緣）<br>` +
-            `偵測到外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
-            `若此圓為已知實際直徑，請在上方輸入實際尺寸後按「完成校正」。`;
-        }
+        applyCircleResult(edges);
+        return; // applyCircleResult 已 drawOverlay
       }
       drawOverlay();
     }
@@ -1639,8 +1738,10 @@
       };
       dragging = null;
       performMeasure();
+      // 必須清空粗選暫存並重繪，否則會殘留紫色虛線（使用者拖曳圓）
       measurePoints = [];
       liveEnd = null;
+      drawOverlay();
     }
 
     // 尺規拖曳
@@ -1649,6 +1750,21 @@
       if (isCaptured && currentTool) {
         e.preventDefault();
         const pos = getPos(e);
+
+        // 若已有圓形結果，優先判斷是否拖曳粉紅準心做微調
+        if (lastResult && lastResult.tool === 'circle' && measurePoints.length === 0) {
+          const dCenter = Math.hypot(pos.x - lastResult.cx, pos.y - lastResult.cy);
+          if (dCenter <= 28) {
+            dragging = {
+              type: 'circle-center-adjust',
+              ox: pos.x,
+              oy: pos.y,
+              cx0: lastResult.cx,
+              cy0: lastResult.cy
+            };
+            return;
+          }
+        }
 
         if (measurePoints.length === 0) {
           // 按下：設定起點，開始拖曳預覽（手機：按住拖到終點再放開即可）
@@ -1691,6 +1807,20 @@
       if (!dragging) return;
       e.preventDefault();
       const pos = getPos(e);
+
+      // 手動拖曳圓心：即時平移標註（放開後再重算半徑）
+      if (dragging.type === 'circle-center-adjust' && lastResult && lastResult.tool === 'circle') {
+        const dx = pos.x - dragging.ox;
+        const dy = pos.y - dragging.oy;
+        lastResult.cx = dragging.cx0 + dx;
+        lastResult.cy = dragging.cy0 + dy;
+        if (greenRegion && greenRegion.type === 'circle') {
+          greenRegion.cx = lastResult.cx;
+          greenRegion.cy = lastResult.cy;
+        }
+        drawOverlay();
+        return;
+      }
 
       // 量測即時綠色區塊預覽（按住拖曳時持續更新）
       if (dragging.type === 'measure-live' && measurePoints.length >= 1 && currentTool) {
@@ -1737,8 +1867,19 @@
     function onPointerUp(e) {
       // 滑鼠移出畫面時不結束量測，避免誤觸
       if (e.type === 'mouseleave') {
-        if (dragging && dragging.type === 'measure-live') return;
+        if (dragging && (dragging.type === 'measure-live' || dragging.type === 'circle-center-adjust')) return;
         dragging = null;
+        return;
+      }
+
+      // 圓心拖曳結束：以新圓心重算邊緣，確保尺寸貼合實體
+      if (dragging && dragging.type === 'circle-center-adjust' && lastResult && lastResult.tool === 'circle') {
+        const cx = lastResult.cx;
+        const cy = lastResult.cy;
+        const approxR = lastResult.outerR || 10;
+        dragging = null;
+        const edges = refineCircleFromCenter(cx, cy, approxR);
+        if (edges) applyCircleResult(edges);
         return;
       }
 
@@ -1876,6 +2017,13 @@
       } else {
         alert('請先完成綠色範圍選取（點選起點與終點）後再調整增益。');
       }
+    });
+    document.querySelectorAll('.center-nudge').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const dx = parseFloat(btn.dataset.dx) || 0;
+        const dy = parseFloat(btn.dataset.dy) || 0;
+        nudgeCircleCenter(dx, dy);
+      });
     });
 
     function updateHint(msg) {
