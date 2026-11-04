@@ -201,13 +201,22 @@
       <button id="btn-finish-calib">完成校正</button>
       <button id="btn-recapture" class="secondary">重新開啟鏡頭</button>
     </div>
-    <!-- 相機進階控制（僅在瀏覽器支援時顯示） -->
-    <div class="calib-row" id="camera-controls" style="display:none;">
+    <!-- 相機進階控制（僅在瀏覽器／硬體支援時顯示對應項目） -->
+    <div class="calib-row" id="camera-controls" style="display:none; flex-wrap:wrap; gap:8px;">
       <label id="zoom-label" style="display:none;">變焦</label>
-      <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:120px;" />
+      <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:100px;" />
       <span id="zoom-value" style="display:none; font-size:12px; color:#94a3b8;">1.0x</span>
       <button id="btn-torch" class="secondary" style="display:none;">開啟補光</button>
-      <span id="cam-capability-hint" style="font-size:11px; color:#64748b;"></span>
+      <label id="focus-label" style="display:none;">對焦</label>
+      <select id="focus-mode" style="display:none; background:#0f172a; border:1px solid #475569; color:#f1f5f9; padding:4px 6px; border-radius:6px; font-size:12px;"></select>
+      <input type="range" id="focus-slider" min="0" max="1" step="0.01" value="0.5" style="display:none; width:90px;" />
+      <label id="iso-label" style="display:none;">ISO</label>
+      <input type="range" id="iso-slider" min="100" max="800" step="10" value="100" style="display:none; width:90px;" />
+      <span id="iso-value" style="display:none; font-size:12px; color:#94a3b8;">—</span>
+      <label id="ev-label" style="display:none;">曝光</label>
+      <input type="range" id="ev-slider" min="-2" max="2" step="0.1" value="0" style="display:none; width:90px;" />
+      <span id="ev-value" style="display:none; font-size:12px; color:#94a3b8;">0</span>
+      <span id="cam-capability-hint" style="font-size:11px; color:#64748b; width:100%;"></span>
     </div>
     <div class="calib-row" id="level-row" style="display:none; align-items:center; gap:10px;">
       <label>水平儀</label>
@@ -253,13 +262,18 @@
       <input type="range" id="edge-gain" min="0.3" max="3.0" step="0.1" value="1.0" style="width:100px; accent-color:#0d9488;" />
       <span id="edge-gain-value" style="font-size:12px; min-width:28px; color:#2dd4bf;">1.0</span>
       <button id="btn-recalc-edge" class="secondary" style="padding:4px 8px; font-size:11px;">重算邊緣</button>
-      <span id="center-nudge-wrap" style="display:none; align-items:center; gap:4px; margin-left:4px;">
-        <span style="font-size:11px; color:#94a3b8;">圓心微調</span>
-        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="-1" style="padding:4px 8px; font-size:12px;" title="上移 1px">↑</button>
-        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="1" style="padding:4px 8px; font-size:12px;" title="下移 1px">↓</button>
-        <button type="button" class="secondary center-nudge" data-dx="-1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="左移 1px">←</button>
-        <button type="button" class="secondary center-nudge" data-dx="1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="右移 1px">→</button>
-        <span style="font-size:10px; color:#64748b;">或拖曳粉紅＋</span>
+      <span id="center-nudge-wrap" style="display:none; align-items:center; gap:4px; margin-left:4px; flex-wrap:wrap;">
+        <span style="font-size:11px; color:#94a3b8;">圓心</span>
+        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="-1" style="padding:4px 8px; font-size:12px;" title="上移 1px（不重算）">↑</button>
+        <button type="button" class="secondary center-nudge" data-dx="0" data-dy="1" style="padding:4px 8px; font-size:12px;" title="下移 1px（不重算）">↓</button>
+        <button type="button" class="secondary center-nudge" data-dx="-1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="左移 1px（不重算）">←</button>
+        <button type="button" class="secondary center-nudge" data-dx="1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="右移 1px（不重算）">→</button>
+        <span style="font-size:11px; color:#94a3b8; margin-left:4px;">外徑</span>
+        <button type="button" class="secondary radius-nudge" data-dr="-0.5" style="padding:4px 8px; font-size:12px;" title="外徑 −0.5 px">−</button>
+        <span id="radius-px-label" style="font-size:12px; color:#2dd4bf; min-width:52px;">— px</span>
+        <button type="button" class="secondary radius-nudge" data-dr="0.5" style="padding:4px 8px; font-size:12px;" title="外徑 +0.5 px">＋</button>
+        <button type="button" id="btn-refine-circle" class="secondary" style="padding:4px 8px; font-size:11px;" title="依目前圓心重算邊緣">依圓心重算</button>
+        <span style="font-size:10px; color:#64748b;">拖＋移圓心／拖粉紅圈調外徑</span>
       </span>
     </div>
   </div>
@@ -403,74 +417,167 @@
       }
     }
 
-    // ==================== 相機進階控制（變焦 / 補光） ====================
+    // ==================== 相機進階控制（變焦 / 補光 / 對焦 / ISO / 曝光） ====================
     function setupCameraControls(track) {
       const controls = document.getElementById('camera-controls');
       const zoomLabel = document.getElementById('zoom-label');
       const zoomSlider = document.getElementById('zoom-slider');
       const zoomValue = document.getElementById('zoom-value');
       const btnTorch = document.getElementById('btn-torch');
+      const focusLabel = document.getElementById('focus-label');
+      const focusMode = document.getElementById('focus-mode');
+      const focusSlider = document.getElementById('focus-slider');
+      const isoLabel = document.getElementById('iso-label');
+      const isoSlider = document.getElementById('iso-slider');
+      const isoValue = document.getElementById('iso-value');
+      const evLabel = document.getElementById('ev-label');
+      const evSlider = document.getElementById('ev-slider');
+      const evValue = document.getElementById('ev-value');
       const hint = document.getElementById('cam-capability-hint');
 
       // 先全部隱藏
+      [zoomLabel, zoomSlider, zoomValue, btnTorch, focusLabel, focusMode, focusSlider,
+        isoLabel, isoSlider, isoValue, evLabel, evSlider, evValue].forEach(el => {
+        if (el) el.style.display = 'none';
+      });
       controls.style.display = 'none';
-      zoomLabel.style.display = 'none';
-      zoomSlider.style.display = 'none';
-      zoomValue.style.display = 'none';
-      btnTorch.style.display = 'none';
       hint.textContent = '';
 
       if (!track || typeof track.getCapabilities !== 'function') {
-        hint.textContent = '此瀏覽器／裝置不支援進階相機控制（常見於 iOS Safari）';
+        hint.textContent = '此瀏覽器／裝置不支援進階相機控制（常見於 iOS Safari）。變焦、對焦、ISO、曝光需由系統相機 App 或支援的 Android Chrome 提供。';
         controls.style.display = 'flex';
         return;
       }
 
       const caps = track.getCapabilities();
+      const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
       let hasAny = false;
-      let messages = [];
+      let unsupported = [];
+      let supported = [];
 
-      // 變焦（Zoom）
-      if (caps.zoom) {
+      // 變焦
+      if (caps.zoom && (caps.zoom.max || 1) > (caps.zoom.min || 1)) {
         const min = caps.zoom.min || 1;
         const max = caps.zoom.max || 1;
         const step = caps.zoom.step || 0.1;
-        if (max > min) {
-          zoomSlider.min = min;
-          zoomSlider.max = max;
-          zoomSlider.step = step;
-          zoomSlider.value = track.getSettings().zoom || min;
-          zoomValue.textContent = Number(zoomSlider.value).toFixed(1) + 'x';
-          zoomLabel.style.display = 'inline';
-          zoomSlider.style.display = 'inline-block';
-          zoomValue.style.display = 'inline';
-          hasAny = true;
-        }
+        zoomSlider.min = min;
+        zoomSlider.max = max;
+        zoomSlider.step = step;
+        zoomSlider.value = settings.zoom != null ? settings.zoom : min;
+        zoomValue.textContent = Number(zoomSlider.value).toFixed(1) + 'x';
+        zoomLabel.style.display = 'inline';
+        zoomSlider.style.display = 'inline-block';
+        zoomValue.style.display = 'inline';
+        hasAny = true;
+        supported.push('變焦');
       } else {
-        messages.push('無變焦');
+        unsupported.push('變焦');
       }
 
-      // 補光燈 / Torch（持續照明，非閃光）
+      // 補光
       if (caps.torch) {
         btnTorch.style.display = 'inline-block';
-        btnTorch.textContent = '開啟補光';
+        btnTorch.textContent = torchOn ? '關閉補光' : '開啟補光';
         hasAny = true;
+        supported.push('補光');
       } else {
-        messages.push('無補光燈');
+        unsupported.push('補光燈');
       }
 
-      // 其他常見但多數不支援的項目
-      if (!caps.focusMode && !caps.focusDistance) messages.push('無手動對焦');
-      if (!caps.iso) messages.push('無 ISO');
-      if (!caps.exposureCompensation && !caps.exposureMode) messages.push('無曝光控制');
-
-      if (hasAny) {
-        controls.style.display = 'flex';
-        hint.textContent = messages.length ? ('不支援：' + messages.join('、')) : '變焦 / 補光可用';
+      // 對焦模式
+      if (caps.focusMode && Array.isArray(caps.focusMode) && caps.focusMode.length) {
+        focusMode.innerHTML = '';
+        caps.focusMode.forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m === 'continuous' ? '連續' : m === 'manual' ? '手動' : m === 'single-shot' ? '單次' : m;
+          focusMode.appendChild(opt);
+        });
+        if (settings.focusMode) focusMode.value = settings.focusMode;
+        focusLabel.style.display = 'inline';
+        focusMode.style.display = 'inline-block';
+        hasAny = true;
+        supported.push('對焦模式');
+        // 手動對焦距離
+        if (caps.focusDistance && (caps.focusDistance.max || 0) > (caps.focusDistance.min || 0)) {
+          focusSlider.min = caps.focusDistance.min;
+          focusSlider.max = caps.focusDistance.max;
+          focusSlider.step = caps.focusDistance.step || 0.01;
+          focusSlider.value = settings.focusDistance != null ? settings.focusDistance : caps.focusDistance.min;
+          focusSlider.style.display = 'inline-block';
+          supported.push('對焦距離');
+        }
+      } else if (!caps.focusMode && !caps.focusDistance) {
+        unsupported.push('手動對焦');
       } else {
-        controls.style.display = 'flex';
-        hint.textContent = '此裝置不支援變焦、補光、ISO、手動對焦等進階控制（瀏覽器限制）';
+        unsupported.push('手動對焦');
       }
+
+      // ISO
+      if (caps.iso && (caps.iso.max || 0) > (caps.iso.min || 0)) {
+        isoSlider.min = caps.iso.min;
+        isoSlider.max = caps.iso.max;
+        isoSlider.step = caps.iso.step || 1;
+        isoSlider.value = settings.iso != null ? settings.iso : caps.iso.min;
+        isoValue.textContent = String(Math.round(isoSlider.value));
+        isoLabel.style.display = 'inline';
+        isoSlider.style.display = 'inline-block';
+        isoValue.style.display = 'inline';
+        hasAny = true;
+        supported.push('ISO');
+      } else {
+        unsupported.push('ISO');
+      }
+
+      // 曝光補償
+      if (caps.exposureCompensation && (caps.exposureCompensation.max || 0) > (caps.exposureCompensation.min || 0)) {
+        evSlider.min = caps.exposureCompensation.min;
+        evSlider.max = caps.exposureCompensation.max;
+        evSlider.step = caps.exposureCompensation.step || 0.1;
+        evSlider.value = settings.exposureCompensation != null ? settings.exposureCompensation : 0;
+        evValue.textContent = Number(evSlider.value).toFixed(1);
+        evLabel.style.display = 'inline';
+        evSlider.style.display = 'inline-block';
+        evValue.style.display = 'inline';
+        hasAny = true;
+        supported.push('曝光');
+      } else {
+        unsupported.push('曝光控制');
+      }
+
+      controls.style.display = 'flex';
+      const parts = [];
+      if (supported.length) parts.push('可用：' + supported.join('、'));
+      if (unsupported.length) parts.push('不支援：' + unsupported.join('、'));
+      parts.push('（實際能否操作取決於手機硬體與瀏覽器，iOS 通常幾乎都不開放）');
+      hint.textContent = parts.join('　');
+    }
+
+    async function applyFocusMode(mode) {
+      if (!videoTrack) return;
+      try {
+        await videoTrack.applyConstraints({ advanced: [{ focusMode: mode }] });
+      } catch (e) { console.warn('對焦模式失敗', e); }
+    }
+    async function applyFocusDistance(v) {
+      if (!videoTrack) return;
+      try {
+        await videoTrack.applyConstraints({ advanced: [{ focusMode: 'manual', focusDistance: Number(v) }] });
+      } catch (e) { console.warn('對焦距離失敗', e); }
+    }
+    async function applyIso(v) {
+      if (!videoTrack) return;
+      try {
+        await videoTrack.applyConstraints({ advanced: [{ iso: Number(v) }] });
+        document.getElementById('iso-value').textContent = String(Math.round(Number(v)));
+      } catch (e) { console.warn('ISO 失敗', e); }
+    }
+    async function applyEv(v) {
+      if (!videoTrack) return;
+      try {
+        await videoTrack.applyConstraints({ advanced: [{ exposureCompensation: Number(v) }] });
+        document.getElementById('ev-value').textContent = Number(v).toFixed(1);
+      } catch (e) { console.warn('曝光失敗', e); }
     }
 
     // 套用變焦
@@ -1587,15 +1694,72 @@
         r: edges.outerR,
         expand: 6
       };
-      // 更新 lastSelection 的參考點，便於增益重算
       if (lastSelection && lastSelection.tool === 'circle') {
         lastSelection.p0 = { x: edges.cx, y: edges.cy };
         lastSelection.p1 = { x: edges.cx + edges.outerR, y: edges.cy };
       }
-      const outerPx = edges.outerR * 2;
+      lastPixelForCalib = edges.outerR * 2;
+      showEdgeGainControls(true);
+      updateCircleResultText();
+      drawOverlay();
+    }
+
+    // 僅平移圓心，不重算外徑（方便先對位再調半徑或按需重算）
+    function nudgeCircleCenter(dx, dy) {
+      if (!lastResult || lastResult.tool !== 'circle') return;
+      lastResult.cx += dx;
+      lastResult.cy += dy;
+      if (lastResult.radii) {
+        // radii 數值不變，僅中心移動
+      }
+      if (greenRegion && greenRegion.type === 'circle') {
+        greenRegion.cx = lastResult.cx;
+        greenRegion.cy = lastResult.cy;
+      }
+      if (lastSelection && lastSelection.tool === 'circle') {
+        lastSelection.p0 = { x: lastResult.cx, y: lastResult.cy };
+        lastSelection.p1 = { x: lastResult.cx + lastResult.outerR, y: lastResult.cy };
+      }
+      updateCircleResultText();
+      drawOverlay();
+    }
+
+    // 手動微調外徑像素（±），不改變圓心
+    function nudgeCircleRadius(dr) {
+      if (!lastResult || lastResult.tool !== 'circle') return;
+      const newR = Math.max(2, (lastResult.outerR || 10) + dr);
+      lastResult.outerR = newR;
+      if (lastResult.radii && lastResult.radii.length) {
+        lastResult.radii[0] = newR;
+      } else {
+        lastResult.radii = [newR];
+      }
+      // 內徑若超過外徑則剔除
+      if (lastResult.radii.length > 1) {
+        lastResult.radii = lastResult.radii.filter((r, i) => i === 0 || r < newR - 1);
+        lastResult.innerR = lastResult.radii.length > 1 ? lastResult.radii[1] : null;
+      }
+      if (greenRegion && greenRegion.type === 'circle') {
+        greenRegion.r = newR;
+      }
+      if (lastSelection && lastSelection.tool === 'circle') {
+        lastSelection.p1 = { x: lastResult.cx + newR, y: lastResult.cy };
+      }
+      lastPixelForCalib = newR * 2;
+      updateCircleResultText();
+      drawOverlay();
+    }
+
+    function updateCircleResultText() {
+      if (!lastResult || lastResult.tool !== 'circle') return;
+      const outerR = lastResult.outerR;
+      const outerPx = outerR * 2;
+      const radii = lastResult.radii || [outerR];
+      const label = document.getElementById('radius-px-label');
+      if (label) label.textContent = outerPx.toFixed(1) + ' px';
+
       if (pixelsPerUnit > 0) {
-        const radii = edges.radii || [edges.outerR];
-        let html = `圓形（自動邊緣，共偵測 ${radii.length} 層）`;
+        let html = `圓形（手動微調中，共 ${radii.length} 層）`;
         radii.forEach((rad, idx) => {
           const d = (rad * 2) / pixelsPerUnit;
           const pxD = rad * 2;
@@ -1609,20 +1773,15 @@
       } else {
         lastPixelForCalib = outerPx;
         document.getElementById('result-text').innerHTML =
-          `校正用圓形（自動邊緣）<br>` +
-          `偵測到外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
-          `可拖曳粉紅＋或用圓心微調對齊實體後，再輸入實際尺寸按「完成校正」。`;
+          `校正用圓形<br>` +
+          `外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
+          `可拖＋移圓心、拖粉紅圈或按 ± 調外徑，對齊後輸入實際尺寸並「完成校正」。`;
       }
-      showEdgeGainControls(true);
-      drawOverlay();
     }
 
-    function nudgeCircleCenter(dx, dy) {
+    function refineCircleAtCurrentCenter() {
       if (!lastResult || lastResult.tool !== 'circle') return;
-      const cx = lastResult.cx + dx;
-      const cy = lastResult.cy + dy;
-      const approxR = lastResult.outerR || 10;
-      const edges = refineCircleFromCenter(cx, cy, approxR);
+      const edges = refineCircleFromCenter(lastResult.cx, lastResult.cy, lastResult.outerR || 10);
       if (edges) applyCircleResult(edges);
     }
 
@@ -1751,9 +1910,20 @@
         e.preventDefault();
         const pos = getPos(e);
 
-        // 若已有圓形結果，優先判斷是否拖曳粉紅準心做微調
+        // 若已有圓形結果：優先拖圓心或拖外徑圓
         if (lastResult && lastResult.tool === 'circle' && measurePoints.length === 0) {
           const dCenter = Math.hypot(pos.x - lastResult.cx, pos.y - lastResult.cy);
+          const r0 = lastResult.outerR || 10;
+          // 點在外徑圓附近（環帶）→ 調外徑
+          if (Math.abs(dCenter - r0) <= 14 && dCenter > 20) {
+            dragging = {
+              type: 'circle-radius-adjust',
+              cx: lastResult.cx,
+              cy: lastResult.cy
+            };
+            return;
+          }
+          // 點在準心附近 → 平移圓心（不重算）
           if (dCenter <= 28) {
             dragging = {
               type: 'circle-center-adjust',
@@ -1808,7 +1978,7 @@
       e.preventDefault();
       const pos = getPos(e);
 
-      // 手動拖曳圓心：即時平移標註（放開後再重算半徑）
+      // 手動拖曳圓心：僅平移，不重算外徑
       if (dragging.type === 'circle-center-adjust' && lastResult && lastResult.tool === 'circle') {
         const dx = pos.x - dragging.ox;
         const dy = pos.y - dragging.oy;
@@ -1818,6 +1988,25 @@
           greenRegion.cx = lastResult.cx;
           greenRegion.cy = lastResult.cy;
         }
+        if (lastSelection && lastSelection.tool === 'circle') {
+          lastSelection.p0 = { x: lastResult.cx, y: lastResult.cy };
+          lastSelection.p1 = { x: lastResult.cx + lastResult.outerR, y: lastResult.cy };
+        }
+        drawOverlay();
+        return;
+      }
+      // 手動拖曳外徑圓：只改半徑像素
+      if (dragging.type === 'circle-radius-adjust' && lastResult && lastResult.tool === 'circle') {
+        const newR = Math.max(2, Math.hypot(pos.x - dragging.cx, pos.y - dragging.cy));
+        lastResult.outerR = newR;
+        if (lastResult.radii && lastResult.radii.length) lastResult.radii[0] = newR;
+        else lastResult.radii = [newR];
+        lastPixelForCalib = newR * 2;
+        if (greenRegion && greenRegion.type === 'circle') greenRegion.r = newR;
+        if (lastSelection && lastSelection.tool === 'circle') {
+          lastSelection.p1 = { x: lastResult.cx + newR, y: lastResult.cy };
+        }
+        updateCircleResultText();
         drawOverlay();
         return;
       }
@@ -1867,19 +2056,16 @@
     function onPointerUp(e) {
       // 滑鼠移出畫面時不結束量測，避免誤觸
       if (e.type === 'mouseleave') {
-        if (dragging && (dragging.type === 'measure-live' || dragging.type === 'circle-center-adjust')) return;
+        if (dragging && (dragging.type === 'measure-live' || dragging.type === 'circle-center-adjust' || dragging.type === 'circle-radius-adjust')) return;
         dragging = null;
         return;
       }
 
-      // 圓心拖曳結束：以新圓心重算邊緣，確保尺寸貼合實體
-      if (dragging && dragging.type === 'circle-center-adjust' && lastResult && lastResult.tool === 'circle') {
-        const cx = lastResult.cx;
-        const cy = lastResult.cy;
-        const approxR = lastResult.outerR || 10;
+      // 圓心／外徑手動調整結束：不自動重算（需按「依圓心重算」）
+      if (dragging && (dragging.type === 'circle-center-adjust' || dragging.type === 'circle-radius-adjust')) {
         dragging = null;
-        const edges = refineCircleFromCenter(cx, cy, approxR);
-        if (edges) applyCircleResult(edges);
+        updateCircleResultText();
+        drawOverlay();
         return;
       }
 
@@ -1978,6 +2164,18 @@
       applyZoom(e.target.value);
     });
     document.getElementById('btn-torch').addEventListener('click', toggleTorch);
+    document.getElementById('focus-mode').addEventListener('change', (e) => {
+      applyFocusMode(e.target.value);
+    });
+    document.getElementById('focus-slider').addEventListener('input', (e) => {
+      applyFocusDistance(e.target.value);
+    });
+    document.getElementById('iso-slider').addEventListener('input', (e) => {
+      applyIso(e.target.value);
+    });
+    document.getElementById('ev-slider').addEventListener('input', (e) => {
+      applyEv(e.target.value);
+    });
 
     // 工具選擇
     document.querySelectorAll('#toolbar [data-tool]').forEach(btn => {
@@ -2024,6 +2222,15 @@
         const dy = parseFloat(btn.dataset.dy) || 0;
         nudgeCircleCenter(dx, dy);
       });
+    });
+    document.querySelectorAll('.radius-nudge').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const dr = parseFloat(btn.dataset.dr) || 0;
+        nudgeCircleRadius(dr);
+      });
+    });
+    document.getElementById('btn-refine-circle').addEventListener('click', () => {
+      refineCircleAtCurrentCenter();
     });
 
     function updateHint(msg) {
