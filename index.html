@@ -302,6 +302,7 @@
       <button id="tool-line" data-tool="line">兩點距離</button>
       <button id="tool-rect" data-tool="rect">矩形</button>
       <button id="tool-circle" data-tool="circle">圓形</button>
+      <button id="tool-circle3" data-tool="circle3">三點成圓</button>
       <button id="btn-clear" class="secondary">清除量測</button>
       <button id="btn-recapture-measure" class="secondary">重新擷取</button>
       <button id="btn-recalib" class="secondary">重新校正</button>
@@ -327,12 +328,24 @@
         <button type="button" class="secondary center-nudge" data-dx="0" data-dy="1" style="padding:4px 8px; font-size:12px;" title="下移 1px（不重算）">↓</button>
         <button type="button" class="secondary center-nudge" data-dx="-1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="左移 1px（不重算）">←</button>
         <button type="button" class="secondary center-nudge" data-dx="1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="右移 1px（不重算）">→</button>
-        <span style="font-size:11px; color:#94a3b8; margin-left:4px;">外徑</span>
-        <button type="button" class="secondary radius-nudge" data-dr="-0.1" style="padding:4px 8px; font-size:12px;" title="外徑 −0.1 px（亞像素）">−</button>
-        <span id="radius-px-label" style="font-size:12px; color:#2dd4bf; min-width:56px;">— px</span>
-        <button type="button" class="secondary radius-nudge" data-dr="0.1" style="padding:4px 8px; font-size:12px;" title="外徑 +0.1 px（亞像素）">＋</button>
+        <span style="font-size:11px; color:#94a3b8; margin-left:4px;">外徑px</span>
+        <button type="button" class="secondary radius-nudge" data-dr="-0.1" style="padding:4px 8px; font-size:12px;" title="外徑 −0.1 px">−</button>
+        <input type="number" id="radius-px-input" step="0.1" style="width:72px; padding:4px 6px; font-size:12px;" title="直接輸入外徑像素（直徑）" />
+        <button type="button" class="secondary radius-nudge" data-dr="0.1" style="padding:4px 8px; font-size:12px;" title="外徑 +0.1 px">＋</button>
         <button type="button" id="btn-refine-circle" class="secondary" style="padding:4px 8px; font-size:11px;" title="依目前圓心重算邊緣">依圓心重算</button>
         <span style="font-size:10px; color:#64748b;">拖＋移圓心／拖粉紅圈調外徑</span>
+      </span>
+      <span id="line-nudge-wrap" style="display:none; align-items:center; gap:4px; margin-left:4px; flex-wrap:wrap;">
+        <span style="font-size:11px; color:#94a3b8;">起點</span>
+        <input type="number" id="line-x1" step="0.1" style="width:58px; padding:3px 4px; font-size:11px;" title="起點 X" />
+        <input type="number" id="line-y1" step="0.1" style="width:58px; padding:3px 4px; font-size:11px;" title="起點 Y" />
+        <span style="font-size:11px; color:#94a3b8;">終點</span>
+        <input type="number" id="line-x2" step="0.1" style="width:58px; padding:3px 4px; font-size:11px;" title="終點 X" />
+        <input type="number" id="line-y2" step="0.1" style="width:58px; padding:3px 4px; font-size:11px;" title="終點 Y" />
+        <span style="font-size:11px; color:#94a3b8;">距離px</span>
+        <input type="number" id="line-dist-px" step="0.1" style="width:64px; padding:3px 4px; font-size:11px;" title="像素距離（改此會沿方向縮放終點）" />
+        <button type="button" id="btn-apply-line-coords" class="secondary" style="padding:4px 8px; font-size:11px;">套用座標</button>
+        <span style="font-size:10px; color:#64748b;">或拖曳粉紅準心</span>
       </span>
     </div>
   </div>
@@ -855,8 +868,8 @@
     function drawOverlay() {
       octx.clearRect(0, 0, overlay.width, overlay.height);
 
-      // 1. 半透明尺規（提高可見度）
-      if (scaleVisible && !isCaptured) {
+      // 1. 半透明尺規（擷取／載入後也可顯示，方便手動校正）
+      if (scaleVisible) {
         octx.save();
         // 先畫一層半透明底，增加對比
         octx.fillStyle = 'rgba(0, 0, 0, 0.25)';
@@ -959,7 +972,7 @@
             octx.setLineDash([4, 3]);
             octx.strokeRect(i.x, i.y, i.w, i.h);
           }
-        } else if (lastResult.tool === 'circle') {
+        } else if (lastResult.tool === 'circle' || lastResult.tool === 'circle3') {
           const radiiToDraw = lastResult.radii && lastResult.radii.length
             ? lastResult.radii
             : (lastResult.outerR ? [lastResult.outerR, lastResult.innerR].filter(Boolean) : []);
@@ -998,6 +1011,26 @@
           octx.beginPath();
           octx.arc(measurePoints[0].x, measurePoints[0].y, r, 0, Math.PI * 2);
           octx.stroke();
+        } else if (currentTool === 'circle3' && measurePoints.length > 0) {
+          measurePoints.forEach(p => {
+            octx.beginPath();
+            octx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+            octx.fill();
+          });
+          if (measurePoints.length === 2) {
+            octx.beginPath();
+            octx.moveTo(measurePoints[0].x, measurePoints[0].y);
+            octx.lineTo(measurePoints[1].x, measurePoints[1].y);
+            octx.stroke();
+          }
+          if (measurePoints.length === 3) {
+            const g = circleFrom3Points(measurePoints[0], measurePoints[1], measurePoints[2]);
+            if (g) {
+              octx.beginPath();
+              octx.arc(g.cx, g.cy, g.r, 0, Math.PI * 2);
+              octx.stroke();
+            }
+          }
         }
         octx.restore();
       }
@@ -1827,10 +1860,120 @@
       const row = document.getElementById('edge-gain-row');
       if (row) row.style.display = show ? 'flex' : 'none';
       const nudge = document.getElementById('center-nudge-wrap');
+      const lineNudge = document.getElementById('line-nudge-wrap');
       if (nudge) {
-        const isCircle = show && lastResult && lastResult.tool === 'circle';
+        const isCircle = show && lastResult && (lastResult.tool === 'circle' || lastResult.tool === 'circle3');
         nudge.style.display = isCircle ? 'inline-flex' : 'none';
       }
+      if (lineNudge) {
+        const isLine = show && lastResult && lastResult.tool === 'line';
+        lineNudge.style.display = isLine ? 'inline-flex' : 'none';
+        if (isLine) syncLineCoordInputs();
+      }
+    }
+
+    // 三點求圓
+    function circleFrom3Points(p1, p2, p3) {
+      const x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y, x3 = p3.x, y3 = p3.y;
+      const a = x1 * (y2 - y3) - y1 * (x2 - x3) + x2 * y3 - x3 * y2;
+      if (Math.abs(a) < 1e-8) return null; // 共線
+      const b = (x1 * x1 + y1 * y1) * (y3 - y2) + (x2 * x2 + y2 * y2) * (y1 - y3) + (x3 * x3 + y3 * y3) * (y2 - y1);
+      const c = (x1 * x1 + y1 * y1) * (x2 - x3) + (x2 * x2 + y2 * y2) * (x3 - x1) + (x3 * x3 + y3 * y3) * (x1 - x2);
+      const cx = -b / (2 * a);
+      const cy = -c / (2 * a);
+      const r = Math.hypot(x1 - cx, y1 - cy);
+      return { cx, cy, r };
+    }
+
+    function finishCircle3(p1, p2, p3) {
+      lastSelection = { tool: 'circle3', p0: p1, p1: p2, p2: p3 };
+      const geo = circleFrom3Points(p1, p2, p3);
+      if (!geo) {
+        alert('三點幾乎共線，無法成圓，請重選。');
+        return;
+      }
+      // 以三點圓為初值，再跑自動邊緣精修
+      const edges = autoEdgeCircle(geo.cx, geo.cy, geo.r, 16);
+      edges.tool = 'circle3';
+      applyCircleResult(edges);
+    }
+
+    function syncLineCoordInputs() {
+      if (!lastResult || lastResult.tool !== 'line') return;
+      const s = lastResult.autoStart, e = lastResult.autoEnd;
+      if (!s || !e) return;
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = Number(v).toFixed(1); };
+      set('line-x1', s.x); set('line-y1', s.y);
+      set('line-x2', e.x); set('line-y2', e.y);
+      set('line-dist-px', Math.hypot(e.x - s.x, e.y - s.y));
+    }
+
+    function applyLineFromInputs() {
+      if (!lastResult || lastResult.tool !== 'line') return;
+      const x1 = parseFloat(document.getElementById('line-x1').value);
+      const y1 = parseFloat(document.getElementById('line-y1').value);
+      const x2 = parseFloat(document.getElementById('line-x2').value);
+      const y2 = parseFloat(document.getElementById('line-y2').value);
+      if ([x1, y1, x2, y2].some(v => Number.isNaN(v))) {
+        alert('請輸入有效的座標數值');
+        return;
+      }
+      lastResult.autoStart = { x: x1, y: y1 };
+      lastResult.autoEnd = { x: x2, y: y2 };
+      const dist = Math.hypot(x2 - x1, y2 - y1);
+      lastPixelForCalib = dist;
+      lastSelection = {
+        tool: 'line',
+        p0: { x: x1, y: y1 },
+        p1: { x: x2, y: y2 }
+      };
+      greenRegion = { type: 'band', x1, y1, x2, y2, width: 14 };
+      updateLineResultText();
+      drawOverlay();
+    }
+
+    function applyLineDistancePx() {
+      if (!lastResult || lastResult.tool !== 'line') return;
+      const dist = parseFloat(document.getElementById('line-dist-px').value);
+      if (!(dist > 0)) return;
+      const s = lastResult.autoStart, e = lastResult.autoEnd;
+      const cur = Math.hypot(e.x - s.x, e.y - s.y) || 1;
+      const ux = (e.x - s.x) / cur, uy = (e.y - s.y) / cur;
+      lastResult.autoEnd = { x: s.x + ux * dist, y: s.y + uy * dist };
+      lastPixelForCalib = dist;
+      lastSelection = {
+        tool: 'line',
+        p0: { ...lastResult.autoStart },
+        p1: { ...lastResult.autoEnd }
+      };
+      greenRegion = {
+        type: 'band',
+        x1: lastResult.autoStart.x, y1: lastResult.autoStart.y,
+        x2: lastResult.autoEnd.x, y2: lastResult.autoEnd.y,
+        width: 14
+      };
+      syncLineCoordInputs();
+      updateLineResultText();
+      drawOverlay();
+    }
+
+    function updateLineResultText() {
+      if (!lastResult || lastResult.tool !== 'line') return;
+      const s = lastResult.autoStart, e = lastResult.autoEnd;
+      const dist = Math.hypot(e.x - s.x, e.y - s.y);
+      lastPixelForCalib = dist;
+      if (pixelsPerUnit > 0) {
+        const actual = dist / pixelsPerUnit;
+        document.getElementById('result-text').innerHTML =
+          `兩點距離（可手動微調）<br>` +
+          `<strong>${actual.toFixed(3)} ${currentUnit}</strong> <span style="color:#94a3b8;font-size:11px;">(${dist.toFixed(1)} px)</span><br>` +
+          `<span style="font-size:11px;color:#94a3b8;">起點 (${s.x.toFixed(1)}, ${s.y.toFixed(1)}) → 終點 (${e.x.toFixed(1)}, ${e.y.toFixed(1)})</span>`;
+      } else {
+        document.getElementById('result-text').innerHTML =
+          `校正用兩點距離<br>像素距離：<strong>${dist.toFixed(1)} px</strong><br>` +
+          `可拖準心或輸入座標後，輸入實際尺寸並「完成校正」。`;
+      }
+      syncLineCoordInputs();
     }
 
     // 從指定圓心重算各層半徑（手動微調圓心後使用，保持與實體對位）
@@ -1884,7 +2027,8 @@
     }
 
     function applyCircleResult(edges) {
-      lastResult = { tool: 'circle', ...edges };
+      const toolName = edges.tool || (lastSelection && lastSelection.tool === 'circle3' ? 'circle3' : 'circle');
+      lastResult = { ...edges, tool: toolName };
       greenRegion = {
         type: 'circle',
         cx: edges.cx,
@@ -1892,7 +2036,7 @@
         r: edges.outerR,
         expand: 6
       };
-      if (lastSelection && lastSelection.tool === 'circle') {
+      if (lastSelection && (lastSelection.tool === 'circle' || lastSelection.tool === 'circle3')) {
         lastSelection.p0 = { x: edges.cx, y: edges.cy };
         lastSelection.p1 = { x: edges.cx + edges.outerR, y: edges.cy };
       }
@@ -1904,7 +2048,7 @@
 
     // 僅平移圓心，不重算外徑（方便先對位再調半徑或按需重算）
     function nudgeCircleCenter(dx, dy) {
-      if (!lastResult || lastResult.tool !== 'circle') return;
+      if (!lastResult || (lastResult.tool !== 'circle' && lastResult.tool !== 'circle3')) return;
       lastResult.cx += dx;
       lastResult.cy += dy;
       if (lastResult.radii) {
@@ -1924,7 +2068,7 @@
 
     // 手動微調外徑像素（±），不改變圓心
     function nudgeCircleRadius(dr) {
-      if (!lastResult || lastResult.tool !== 'circle') return;
+      if (!lastResult || (lastResult.tool !== 'circle' && lastResult.tool !== 'circle3')) return;
       const newR = Math.max(2, (lastResult.outerR || 10) + dr);
       lastResult.outerR = newR;
       if (lastResult.radii && lastResult.radii.length) {
@@ -1949,15 +2093,17 @@
     }
 
     function updateCircleResultText() {
-      if (!lastResult || lastResult.tool !== 'circle') return;
+      if (!lastResult || (lastResult.tool !== 'circle' && lastResult.tool !== 'circle3')) return;
       const outerR = lastResult.outerR;
       const outerPx = outerR * 2;
       const radii = lastResult.radii || [outerR];
-      const label = document.getElementById('radius-px-label');
-      if (label) label.textContent = outerPx.toFixed(1) + ' px';
+      const inp = document.getElementById('radius-px-input');
+      if (inp && document.activeElement !== inp) inp.value = outerPx.toFixed(2);
+      lastPixelForCalib = outerPx;
+      const title = lastResult.tool === 'circle3' ? '三點成圓' : '圓形';
 
       if (pixelsPerUnit > 0) {
-        let html = `圓形（手動微調中，共 ${radii.length} 層）`;
+        let html = `${title}（可手動微調，共 ${radii.length} 層）`;
         radii.forEach((rad, idx) => {
           const d = (rad * 2) / pixelsPerUnit;
           const pxD = rad * 2;
@@ -1969,18 +2115,38 @@
         });
         document.getElementById('result-text').innerHTML = html;
       } else {
-        lastPixelForCalib = outerPx;
         document.getElementById('result-text').innerHTML =
-          `校正用圓形<br>` +
-          `外徑像素：<strong>${outerPx.toFixed(1)} px</strong><br>` +
-          `可拖＋移圓心、拖粉紅圈或按 ± 調外徑，對齊後輸入實際尺寸並「完成校正」。`;
+          `校正用${title}<br>` +
+          `外徑像素：<strong>${outerPx.toFixed(2)} px</strong><br>` +
+          `可輸入外徑px、拖＋移圓心、拖粉紅圈，對齊後輸入實際尺寸並「完成校正」。`;
       }
     }
 
+    function setCircleDiameterPx(diamPx) {
+      if (!lastResult || (lastResult.tool !== 'circle' && lastResult.tool !== 'circle3')) return;
+      const d = parseFloat(diamPx);
+      if (!(d > 1)) return;
+      const newR = d / 2;
+      lastResult.outerR = newR;
+      if (lastResult.radii && lastResult.radii.length) lastResult.radii[0] = newR;
+      else lastResult.radii = [newR];
+      if (lastResult.radii.length > 1) {
+        lastResult.radii = lastResult.radii.filter((r, i) => i === 0 || r < newR - 1);
+        lastResult.innerR = lastResult.radii.length > 1 ? lastResult.radii[1] : null;
+      }
+      if (greenRegion && greenRegion.type === 'circle') greenRegion.r = newR;
+      lastPixelForCalib = d;
+      updateCircleResultText();
+      drawOverlay();
+    }
+
     function refineCircleAtCurrentCenter() {
-      if (!lastResult || lastResult.tool !== 'circle') return;
+      if (!lastResult || (lastResult.tool !== 'circle' && lastResult.tool !== 'circle3')) return;
       const edges = refineCircleFromCenter(lastResult.cx, lastResult.cy, lastResult.outerR || 10);
-      if (edges) applyCircleResult(edges);
+      if (edges) {
+        edges.tool = lastResult.tool;
+        applyCircleResult(edges);
+      }
     }
 
     function performMeasure() {
@@ -2014,19 +2180,7 @@
           pixel: pixelDist,
           real: pixelsPerUnit > 0 ? pixelDist / pixelsPerUnit : null
         };
-
-        if (pixelsPerUnit > 0) {
-          const real = pixelDist / pixelsPerUnit;
-          document.getElementById('result-text').innerHTML =
-            `兩點距離（自動邊緣）<br>` +
-            `像素距離：${pixelDist.toFixed(1)} px<br>` +
-            `<strong>實際尺寸：${real.toFixed(3)} ${currentUnit}</strong>`;
-        } else {
-          document.getElementById('result-text').innerHTML =
-            `校正用兩點距離（自動邊緣）<br>` +
-            `偵測到像素距離：<strong>${pixelDist.toFixed(1)} px</strong><br>` +
-            `請在上方輸入此段的「實際尺寸」，然後按「完成校正」。`;
-        }
+        updateLineResultText();
       }
       else if (tool === 'rect') {
         const x = Math.min(p0.x, p1.x);
@@ -2117,8 +2271,34 @@
         e.preventDefault();
         const pos = getPos(e);
 
+        // 若開啟尺規且點到尺規控制點，優先拖尺規（載入影像後手動校正）
+        if (scaleVisible && measurePoints.length === 0) {
+          const hitR = 20;
+          if (scaleMode === 'line') {
+            if (Math.hypot(pos.x - lineScale.x1, pos.y - lineScale.y1) < hitR) { dragging = { type: 'line-end1' }; return; }
+            if (Math.hypot(pos.x - lineScale.x2, pos.y - lineScale.y2) < hitR) { dragging = { type: 'line-end2' }; return; }
+          } else {
+            if (Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) < hitR) { dragging = { type: 'circle-center' }; return; }
+            if (Math.abs(Math.hypot(pos.x - circleScale.cx, pos.y - circleScale.cy) - circleScale.r) < 14) { dragging = { type: 'circle-radius' }; return; }
+          }
+        }
+
+        // 兩點距離：拖曳端點準心微調
+        if (lastResult && lastResult.tool === 'line' && lastResult.autoStart && lastResult.autoEnd && measurePoints.length === 0) {
+          const d1 = Math.hypot(pos.x - lastResult.autoStart.x, pos.y - lastResult.autoStart.y);
+          const d2 = Math.hypot(pos.x - lastResult.autoEnd.x, pos.y - lastResult.autoEnd.y);
+          if (d1 <= 22) {
+            dragging = { type: 'line-pt-adjust', which: 'start' };
+            return;
+          }
+          if (d2 <= 22) {
+            dragging = { type: 'line-pt-adjust', which: 'end' };
+            return;
+          }
+        }
+
         // 若已有圓形結果：優先拖圓心或拖外徑圓
-        if (lastResult && lastResult.tool === 'circle' && measurePoints.length === 0) {
+        if (lastResult && (lastResult.tool === 'circle' || lastResult.tool === 'circle3') && measurePoints.length === 0) {
           const dCenter = Math.hypot(pos.x - lastResult.cx, pos.y - lastResult.cy);
           const r0 = lastResult.outerR || 10;
           // 點在外徑圓附近（環帶）→ 調外徑
@@ -2143,6 +2323,24 @@
           }
         }
 
+        // 三點成圓：依序點三個圓周點
+        if (currentTool === 'circle3') {
+          greenRegion = null;
+          if (measurePoints.length === 0) lastResult = null;
+          measurePoints.push({ x: pos.x, y: pos.y });
+          if (measurePoints.length < 3) {
+            updateHint(`三點成圓：已點 ${measurePoints.length}/3，請再點圓周上的點。`);
+            drawOverlay();
+          } else {
+            const [a, b, c] = measurePoints;
+            finishCircle3(a, b, c);
+            measurePoints = [];
+            liveEnd = null;
+            drawOverlay();
+          }
+          return;
+        }
+
         if (measurePoints.length === 0) {
           // 按下：設定起點，開始拖曳預覽（手機：按住拖到終點再放開即可）
           measurePoints = [pos];
@@ -2158,8 +2356,8 @@
         return;
       }
 
-      // 舊有尺規拖曳（校正輔助，可選）
-      if (scaleVisible && !isCaptured) {
+      // 半透明尺規拖曳（擷取／載入後也可操作）
+      if (scaleVisible && !(isCaptured && currentTool && measurePoints.length > 0)) {
         e.preventDefault();
         const pos = getPos(e);
         const hitR = 20;
@@ -2195,7 +2393,7 @@
       const pos = getPos(e);
 
       // 手動拖曳圓心：僅平移，不重算外徑
-      if (dragging.type === 'circle-center-adjust' && lastResult && lastResult.tool === 'circle') {
+      if (dragging.type === 'circle-center-adjust' && lastResult && (lastResult.tool === 'circle' || lastResult.tool === 'circle3')) {
         const dx = pos.x - dragging.ox;
         const dy = pos.y - dragging.oy;
         lastResult.cx = dragging.cx0 + dx;
@@ -2211,8 +2409,23 @@
         drawOverlay();
         return;
       }
+      // 兩點距離端點微調
+      if (dragging.type === 'line-pt-adjust' && lastResult && lastResult.tool === 'line') {
+        if (dragging.which === 'start') lastResult.autoStart = { x: pos.x, y: pos.y };
+        else lastResult.autoEnd = { x: pos.x, y: pos.y };
+        greenRegion = {
+          type: 'band',
+          x1: lastResult.autoStart.x, y1: lastResult.autoStart.y,
+          x2: lastResult.autoEnd.x, y2: lastResult.autoEnd.y,
+          width: 14
+        };
+        updateLineResultText();
+        drawOverlay();
+        return;
+      }
+
       // 手動拖曳外徑圓：只改半徑像素
-      if (dragging.type === 'circle-radius-adjust' && lastResult && lastResult.tool === 'circle') {
+      if (dragging.type === 'circle-radius-adjust' && lastResult && (lastResult.tool === 'circle' || lastResult.tool === 'circle3')) {
         const newR = Math.max(2, Math.hypot(pos.x - dragging.cx, pos.y - dragging.cy));
         lastResult.outerR = newR;
         if (lastResult.radii && lastResult.radii.length) lastResult.radii[0] = newR;
@@ -2280,6 +2493,13 @@
       if (dragging && dragging.type === 'view-pan') {
         dragging = null;
         viewPanning = null;
+        return;
+      }
+
+      if (dragging && dragging.type === 'line-pt-adjust') {
+        dragging = null;
+        updateLineResultText();
+        drawOverlay();
         return;
       }
 
@@ -2434,9 +2654,15 @@
         dragging = null;
         showEdgeGainControls(false);
         drawOverlay();
-        updateHint(currentTool === 'circle'
-          ? `已選擇「圓形」。拖出綠色範圍包住目標圓即可，圓心由邊緣自動計算（不依手指起點），可避免偏心。完成後可用邊緣增益微調。`
-          : `已選擇「${btn.textContent}」。手機：按住起點拖到終點再放開即可；桌面也可點兩下。拖曳時顯示綠色範圍，放開後自動對邊。完成後可用邊緣增益微調。`);
+        if (currentTool === 'circle') {
+          updateHint('已選擇「圓形」（圓心→外徑）。拖出綠色範圍包住目標圓即可，圓心由邊緣自動計算。可輸入外徑px微調。');
+        } else if (currentTool === 'circle3') {
+          updateHint('已選擇「三點成圓」。依序在圓周上點三個點，系統擬合圓並自動精修邊緣。');
+        } else if (currentTool === 'line') {
+          updateHint('已選擇「兩點距離」。拖曳或點兩下完成後，可拖粉紅準心或輸入起終點座標／距離px 微調。');
+        } else {
+          updateHint(`已選擇「${btn.textContent}」。手機：按住起點拖到終點再放開；桌面也可點兩下。完成後可用邊緣增益微調。`);
+        }
       });
     });
 
@@ -2474,6 +2700,23 @@
     });
     document.getElementById('btn-refine-circle').addEventListener('click', () => {
       refineCircleAtCurrentCenter();
+    });
+    const radiusPxInput = document.getElementById('radius-px-input');
+    if (radiusPxInput) {
+      radiusPxInput.addEventListener('change', () => setCircleDiameterPx(radiusPxInput.value));
+      radiusPxInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); setCircleDiameterPx(radiusPxInput.value); }
+      });
+    }
+    document.getElementById('btn-apply-line-coords').addEventListener('click', applyLineFromInputs);
+    document.getElementById('line-dist-px').addEventListener('change', applyLineDistancePx);
+    document.getElementById('line-dist-px').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); applyLineDistancePx(); }
+    });
+    ['line-x1', 'line-y1', 'line-x2', 'line-y2'].forEach(id => {
+      document.getElementById(id).addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); applyLineFromInputs(); }
+      });
     });
 
     function updateHint(msg) {
