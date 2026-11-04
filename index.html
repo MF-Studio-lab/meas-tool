@@ -201,7 +201,7 @@
       <button id="btn-finish-calib">完成校正</button>
       <button id="btn-recapture" class="secondary">重新開啟鏡頭</button>
     </div>
-    <!-- 相機進階控制（僅在瀏覽器／硬體支援時顯示對應項目） -->
+    <!-- 相機進階控制（擷取後改為 invisible 佔位，避免影像區上跳導致對位偏移） -->
     <div class="calib-row" id="camera-controls" style="display:none; flex-wrap:wrap; gap:8px;">
       <label id="zoom-label" style="display:none;">變焦</label>
       <input type="range" id="zoom-slider" min="1" max="5" step="0.1" value="1" style="display:none; width:100px;" />
@@ -269,9 +269,9 @@
         <button type="button" class="secondary center-nudge" data-dx="-1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="左移 1px（不重算）">←</button>
         <button type="button" class="secondary center-nudge" data-dx="1" data-dy="0" style="padding:4px 8px; font-size:12px;" title="右移 1px（不重算）">→</button>
         <span style="font-size:11px; color:#94a3b8; margin-left:4px;">外徑</span>
-        <button type="button" class="secondary radius-nudge" data-dr="-0.5" style="padding:4px 8px; font-size:12px;" title="外徑 −0.5 px">−</button>
-        <span id="radius-px-label" style="font-size:12px; color:#2dd4bf; min-width:52px;">— px</span>
-        <button type="button" class="secondary radius-nudge" data-dr="0.5" style="padding:4px 8px; font-size:12px;" title="外徑 +0.5 px">＋</button>
+        <button type="button" class="secondary radius-nudge" data-dr="-0.1" style="padding:4px 8px; font-size:12px;" title="外徑 −0.1 px（亞像素）">−</button>
+        <span id="radius-px-label" style="font-size:12px; color:#2dd4bf; min-width:56px;">— px</span>
+        <button type="button" class="secondary radius-nudge" data-dr="0.1" style="padding:4px 8px; font-size:12px;" title="外徑 +0.1 px（亞像素）">＋</button>
         <button type="button" id="btn-refine-circle" class="secondary" style="padding:4px 8px; font-size:11px;" title="依目前圓心重算邊緣">依圓心重算</button>
         <span style="font-size:10px; color:#64748b;">拖＋移圓心／拖粉紅圈調外徑</span>
       </span>
@@ -435,11 +435,14 @@
       const evValue = document.getElementById('ev-value');
       const hint = document.getElementById('cam-capability-hint');
 
-      // 先全部隱藏
+      // 先全部隱藏子控制，並恢復列的可見性（重新開鏡頭時）
       [zoomLabel, zoomSlider, zoomValue, btnTorch, focusLabel, focusMode, focusSlider,
         isoLabel, isoSlider, isoValue, evLabel, evSlider, evValue].forEach(el => {
         if (el) el.style.display = 'none';
       });
+      controls.style.visibility = 'visible';
+      controls.style.pointerEvents = 'auto';
+      controls.style.minHeight = '';
       controls.style.display = 'none';
       hint.textContent = '';
 
@@ -957,7 +960,19 @@
         videoTrack = null;
         video.srcObject = null;
       }
-      document.getElementById('camera-controls').style.display = 'none';
+
+      // 保留相機控制列佔位高度，避免列消失後影像區上移、準心相對偏移
+      const camControls = document.getElementById('camera-controls');
+      if (camControls) {
+        const h = camControls.getBoundingClientRect().height;
+        if (h > 0) camControls.style.minHeight = Math.ceil(h) + 'px';
+        camControls.style.visibility = 'hidden';
+        camControls.style.pointerEvents = 'none';
+        // 仍用 flex 佔位，不要 display:none
+        if (camControls.style.display === 'none') {
+          camControls.style.display = 'flex';
+        }
+      }
 
       video.style.display = 'none';
       canvas.style.display = 'block';
@@ -975,8 +990,13 @@
         updateHint('影像已擷取，相機已關閉。選擇工具後，點選起點會即時顯示綠色邊緣範圍，確認後再點終點即可自動計算。完成後可用邊緣增益微調。');
         document.getElementById('result-text').textContent = '請選擇量測工具並在影像上操作。';
       }
-      // 同步 overlay 與 canvas 顯示尺寸（手機結果列變動時也不錯位）
+      // 強制 reflow 後再同步 overlay，避免控制列高度變化造成準心相對偏移
+      void document.body.offsetHeight;
       resizeOverlay();
+      requestAnimationFrame(() => {
+        resizeOverlay();
+        drawOverlay();
+      });
     }
 
     // ==================== 簡易邊緣偵測（純 JS，降低人為誤差） ====================
@@ -1149,12 +1169,101 @@
       return g00 * (1 - fx) * (1 - fy) + g10 * fx * (1 - fy) + g01 * (1 - fx) * fy + g11 * fx * fy;
     }
 
-    // 亞像素峰值（拋物線擬合）
+    // 亞像素峰值（3 點二次多項式）
     function subpixelPeak(y0, y1, y2) {
       const denom = 2 * (2 * y1 - y0 - y2);
       if (Math.abs(denom) < 1e-6) return 0;
       const d = (y0 - y2) / denom;
       return Math.max(-0.5, Math.min(0.5, d));
+    }
+
+    /**
+     * 5 點高斯／二次亞像素定位
+     * samples: 以 peakIdx 為中心的強度陣列（長度>=5）
+     * 回傳相對於 peakIdx 的偏移（可為小數）
+     */
+    function subpixelFit5(samples, peakIdx) {
+      if (!samples || samples.length < 3) return 0;
+      const i = Math.max(1, Math.min(samples.length - 2, peakIdx));
+      // 優先 3 點二次
+      let d = subpixelPeak(samples[i - 1], samples[i], samples[i + 1]);
+      // 若有 5 點，用對數域近似高斯（log y ≈ a + b x + c x^2）
+      if (i >= 2 && i <= samples.length - 3) {
+        const ys = [];
+        const xs = [-2, -1, 0, 1, 2];
+        let ok = true;
+        for (let k = -2; k <= 2; k++) {
+          const v = samples[i + k];
+          if (v <= 1e-6) { ok = false; break; }
+          ys.push(Math.log(v));
+        }
+        if (ok) {
+          // 最小二乘擬合 c, b（對稱）: y = a + b x + c x^2
+          // 對 x^2 與 x 正規方程簡化
+          let sX2 = 0, sX4 = 0, sY = 0, sYX2 = 0, sYX = 0, sX = 0;
+          for (let k = 0; k < 5; k++) {
+            const x = xs[k], y = ys[k];
+            sX += x; sX2 += x * x; sX4 += x * x * x * x;
+            sY += y; sYX += y * x; sYX2 += y * x * x;
+          }
+          const n = 5;
+          // b = sYX / sX2 (sX=0 for symmetric)
+          // c from (sYX2 - c terms)
+          const b = sYX / (sX2 || 1);
+          const c = (n * sYX2 - sY * sX2) / (n * sX4 - sX2 * sX2 || 1);
+          if (c < -1e-6) {
+            // 峰值在 x = -b/(2c)
+            const mu = -b / (2 * c);
+            if (Math.abs(mu) <= 1.5) d = mu;
+          }
+        }
+      }
+      return Math.max(-1.2, Math.min(1.2, d));
+    }
+
+    /** 沿射線以 0.25px 取樣，回傳亞像素邊緣半徑（半高 + 局部峰值擬合） */
+    function radialEdgeSubpixel(imgData, cx, cy, cos, sin, approxR, searchHalf) {
+      const step = 0.25;
+      const n = Math.floor((2 * searchHalf) / step) + 1;
+      const mags = new Float64Array(n);
+      const rads = new Float64Array(n);
+      let bestI = 0, bestM = -1;
+      for (let i = 0; i < n; i++) {
+        const rad = approxR - searchHalf + i * step;
+        rads[i] = rad;
+        if (rad < 2) { mags[i] = 0; continue; }
+        const g1 = sampleGray(imgData, cx + cos * (rad - step), cy + sin * (rad - step));
+        const g2 = sampleGray(imgData, cx + cos * (rad + step), cy + sin * (rad + step));
+        const mag = Math.abs(g2 - g1);
+        mags[i] = mag;
+        if (mag > bestM) { bestM = mag; bestI = i; }
+      }
+      if (bestM < 1e-3) return approxR;
+
+      // 峰值亞像素
+      const dPeak = subpixelFit5(Array.from(mags), bestI);
+      let edgeR = rads[bestI] + dPeak * step;
+
+      // 半高交越精修（內外代表灰階）
+      const peakR = edgeR;
+      const gIn = sampleGray(imgData, cx + cos * Math.max(2, peakR - 4), cy + sin * Math.max(2, peakR - 4));
+      const gOut = sampleGray(imgData, cx + cos * (peakR + 4), cy + sin * (peakR + 4));
+      if (Math.abs(gOut - gIn) >= 5) {
+        const mid = (gIn + gOut) * 0.5;
+        let prevG = sampleGray(imgData, cx + cos * (peakR - 3), cy + sin * (peakR - 3));
+        let prevR = peakR - 3;
+        for (let rad = peakR - 3 + 0.1; rad <= peakR + 3; rad += 0.1) {
+          const g = sampleGray(imgData, cx + cos * rad, cy + sin * rad);
+          if ((prevG - mid) * (g - mid) <= 0 && Math.abs(g - prevG) > 1e-3) {
+            const t = (mid - prevG) / (g - prevG);
+            edgeR = prevR + 0.1 * Math.max(0, Math.min(1, t));
+            break;
+          }
+          prevG = g;
+          prevR = rad;
+        }
+      }
+      return edgeR;
     }
 
     // 代數圓擬合（x²+y² + D x + E y + F = 0）→ 回傳 {cx, cy, r} 或 null
@@ -1467,53 +1576,14 @@
         outerPeak = peaks[0];
       }
 
-      // ---- 4) 各角度精修外徑：用「半高強度」定位，比單純最大梯度更穩、較不易偏內 ----
-      // 沿射線取內側（物體）與外側（背景）灰階，邊緣定在 (內+外)/2 的交越點
+      // ---- 4) 各角度亞像素精修外徑（0.25px 取樣 + 5 點高斯／二次擬合 + 半高交越）----
       const rayRs = [];
       const searchHalf = Math.min(expand, 12);
       for (let i = 0; i < angles; i++) {
         const ang = (i / angles) * Math.PI * 2;
         const cos = Math.cos(ang), sin = Math.sin(ang);
-
-        // 先找最大梯度位置當過渡區中心
-        let peakR = outerPeak.r, bestD = -1;
-        for (let d = -searchHalf; d <= searchHalf; d += 0.5) {
-          const rad = outerPeak.r + d;
-          if (rad < 3) continue;
-          const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
-          const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
-          const deriv = Math.abs(g2 - g1);
-          if (deriv > bestD) { bestD = deriv; peakR = rad; }
-        }
-        if (bestD < peakTh * 0.45) continue;
-
-        // 內側 / 外側代表灰階（避開過渡帶）
-        const innerGray = sampleGray(imgData, cx + cos * Math.max(2, peakR - 4), cy + sin * Math.max(2, peakR - 4));
-        const outerGray = sampleGray(imgData, cx + cos * (peakR + 4), cy + sin * (peakR + 4));
-        const mid = (innerGray + outerGray) * 0.5;
-        if (Math.abs(outerGray - innerGray) < 6) {
-          // 對比不足，退回最大梯度位置
-          rayRs.push(peakR);
-          continue;
-        }
-
-        // 在過渡帶內找灰階穿越 mid 的亞像素位置
-        let edgeR = peakR;
-        const lo = peakR - 3, hi = peakR + 3;
-        let prevG = sampleGray(imgData, cx + cos * lo, cy + sin * lo);
-        let prevR = lo;
-        for (let rad = lo + 0.25; rad <= hi; rad += 0.25) {
-          const g = sampleGray(imgData, cx + cos * rad, cy + sin * rad);
-          // 無論由暗到亮或由亮到暗，只要跨越 mid
-          if ((prevG - mid) * (g - mid) <= 0 && Math.abs(g - prevG) > 1e-3) {
-            const t = (mid - prevG) / (g - prevG);
-            edgeR = prevR + 0.25 * Math.max(0, Math.min(1, t));
-            break;
-          }
-          prevG = g;
-          prevR = rad;
-        }
-        rayRs.push(edgeR);
+        const edgeR = radialEdgeSubpixel(imgData, cx, cy, cos, sin, outerPeak.r, searchHalf);
+        if (edgeR > 2) rayRs.push(edgeR);
       }
       rayRs.sort((a, b) => a - b);
       // 去掉兩端極端值再取中位，降低單邊反光影響
@@ -1615,40 +1685,13 @@
       const expand = 16;
       const angles = 48;
       const searchHalf = Math.min(expand, 12);
-      // 外徑：半高法
+      // 外徑：亞像素射線
       const rayRs = [];
       for (let i = 0; i < angles; i++) {
         const ang = (i / angles) * Math.PI * 2;
         const cos = Math.cos(ang), sin = Math.sin(ang);
-        let peakR = approxR, bestD = -1;
-        for (let d = -searchHalf; d <= searchHalf; d += 0.5) {
-          const rad = approxR + d;
-          if (rad < 2) continue;
-          const g1 = sampleGray(imgData, cx + cos * (rad - 0.5), cy + sin * (rad - 0.5));
-          const g2 = sampleGray(imgData, cx + cos * (rad + 0.5), cy + sin * (rad + 0.5));
-          const deriv = Math.abs(g2 - g1);
-          if (deriv > bestD) { bestD = deriv; peakR = rad; }
-        }
-        if (bestD < 2) continue;
-        const gIn = sampleGray(imgData, cx + cos * Math.max(1.5, peakR - 3), cy + sin * Math.max(1.5, peakR - 3));
-        const gOut = sampleGray(imgData, cx + cos * (peakR + 3), cy + sin * (peakR + 3));
-        const mid = (gIn + gOut) * 0.5;
-        let edgeR = peakR;
-        if (Math.abs(gOut - gIn) >= 5) {
-          let prevG = sampleGray(imgData, cx + cos * (peakR - 2.5), cy + sin * (peakR - 2.5));
-          let prevR = peakR - 2.5;
-          for (let rad = peakR - 2.25; rad <= peakR + 2.5; rad += 0.25) {
-            const g = sampleGray(imgData, cx + cos * rad, cy + sin * rad);
-            if ((prevG - mid) * (g - mid) <= 0 && Math.abs(g - prevG) > 1e-3) {
-              const t = (mid - prevG) / (g - prevG);
-              edgeR = prevR + 0.25 * Math.max(0, Math.min(1, t));
-              break;
-            }
-            prevG = g;
-            prevR = rad;
-          }
-        }
-        rayRs.push(edgeR);
+        const edgeR = radialEdgeSubpixel(imgData, cx, cy, cos, sin, approxR, searchHalf);
+        if (edgeR > 2) rayRs.push(edgeR);
       }
       if (!rayRs.length) return { cx, cy, outerR: approxR, radii: [approxR], innerR: null };
       rayRs.sort((a, b) => a - b);
